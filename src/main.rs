@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::time::Instant;
 use tarkka::{AggregatedWord, PosGlosses, WordEntry, WordEntryComplete};
 
 fn main() {
@@ -9,28 +10,37 @@ fn main() {
 }
 
 fn write(aggregated_words: HashMap<String, AggregatedWord>) {
+    let s = Instant::now();
     let mut sorted_words: Vec<_> = aggregated_words.values().collect();
     sorted_words.sort_by(|a, b| a.word.cmp(&b.word));
+    println!("sorted {:?}", s.elapsed());
 
-    let mut json_data = String::new();
-    let mut word_to_offset: HashMap<String, u32> = HashMap::new();
-    let mut current_offset: u32 = 0;
-
+    // Serialize all words once and store with the word data
+    let mut words_with_json: Vec<(&AggregatedWord, String)> =
+        Vec::with_capacity(sorted_words.len());
     for word in &sorted_words {
-        // TODO straight into encoder
-        word_to_offset.insert(word.word.clone(), current_offset);
         let serialized = serde_json::to_string(word).unwrap();
-        json_data.push_str(&serialized);
-        current_offset = current_offset.checked_add(serialized.len() as u32).unwrap();
+        words_with_json.push((word, serialized));
     }
+    println!("serialized {:?}", s.elapsed());
 
-    let mut groups: BTreeMap<String, Vec<&AggregatedWord>> = BTreeMap::new();
+    let mut groups: BTreeMap<String, Vec<(&AggregatedWord, u16)>> = BTreeMap::new();
     let mut word_size = 0;
-    for word in &sorted_words {
+    for (word, json) in &words_with_json {
         let first_char = word.word.chars().next().unwrap().to_string();
         word_size += word.word.len();
-        groups.entry(first_char).or_default().push(word);
+        assert!(
+            json.len() <= u16::MAX as usize,
+            "JSON entry too large: {} bytes for word '{}'",
+            json.len(),
+            word.word
+        );
+        groups
+            .entry(first_char)
+            .or_default()
+            .push((word, json.len() as u16));
     }
+    println!("grouped {:?}", s.elapsed());
     println!("total word len {word_size}");
 
     let mut level1_data = Vec::with_capacity(1024);
@@ -39,21 +49,12 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     let mut encoder = zeekstd::Encoder::new(&mut output).unwrap();
     let mut level2_size: u32 = 0;
 
+    let mut max_jo = 0;
+    let mut current_json_offset: u32 = 0;
+
     for (first_char, words) in groups {
         let mut l2_raw_size = 0u32;
-        for word in words {
-            let json_offset = word_to_offset[&word.word];
-            let serialized = serde_json::to_string(word).unwrap();
-            // TODO: move this to the front of the json entry to avoid serializing twice
-            let json_size = serialized.len();
-
-            assert!(
-                json_size <= 65535,
-                "JSON entry too large: {} bytes for word '{}'",
-                json_size,
-                word.word
-            );
-
+        for (word, json_size) in words {
             // Format: [word_len][word][offset_in_json_data][json_size]
 
             // L2 index per-word overhead = 7b
@@ -64,14 +65,17 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
             assert!(word.word.len() <= 255);
             encoder.write(&[word.word.len() as u8]).unwrap();
             encoder.write(word.word.as_bytes()).unwrap();
-            encoder.write(json_offset.to_le_bytes().as_slice()).unwrap();
+            encoder
+                .write(current_json_offset.to_le_bytes().as_slice())
+                .unwrap();
             encoder
                 .write((json_size as u16).to_le_bytes().as_slice())
                 .unwrap();
+            max_jo = std::cmp::max(max_jo, current_json_offset);
+            current_json_offset = current_json_offset.checked_add(json_size as u32).unwrap();
             l2_raw_size += 1 + word.word.len() as u32 + 4 + 2;
         }
 
-        println!("c {first_char} l2off {level2_size} l2sz {l2_raw_size}");
         // Level 1: [first_char_utf8_bytes][l2 offset u32][l2 size u32]
         level1_data.extend(first_char.as_bytes());
         level1_data.extend(level2_size.to_le_bytes());
@@ -79,11 +83,18 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
 
         level2_size += l2_raw_size;
     }
+    println!("compressed {:?}", s.elapsed());
 
-    println!("l2 sz {}", level2_size);
-    let jb = json_data.as_bytes();
-    encoder.write_all(jb).unwrap();
+    println!("max_jo {max_jo} l2 sz {}", level2_size);
+
+    // Write all JSON data to encoder
+    let mut total_json_size = 0u32;
+    for (_, serialized_json) in &words_with_json {
+        encoder.write_all(serialized_json.as_bytes()).unwrap();
+        total_json_size += serialized_json.len() as u32;
+    }
     encoder.finish().unwrap();
+    println!("finish compress {:?}", s.elapsed());
 
     let mut file = File::create("dictionary.dict").unwrap();
 
@@ -91,7 +102,7 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     file.write_all(&(level1_data.len() as u32).to_le_bytes())
         .unwrap(); // level1 size
     file.write_all(&(level2_size as u32).to_le_bytes()).unwrap(); // level2 size
-    file.write_all(&(jb.len() as u32).to_le_bytes()).unwrap(); // json data size
+    file.write_all(&total_json_size.to_le_bytes()).unwrap(); // json data size
 
     file.write_all(&level1_data).unwrap();
     file.write_all(&output).unwrap();
@@ -107,25 +118,30 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     println!("Level 2 size: {} bytes", level2_size);
     println!(
         "JSON data size: raw {} compressed {}",
-        json_data.len(),
-        compressed_json_sz
+        total_json_size, compressed_json_sz
     );
 }
 
 fn build_index() -> HashMap<String, AggregatedWord> {
     //let content = std::fs::read_to_string("./example-es.jsonl").unwrap();
-    let content = std::fs::read_to_string("./es-extract.jsonl").unwrap();
-    let lines = content.split('\n');
+    //let content = std::fs::read_to_string("./es-extract.jsonl").unwrap();
+    let f = File::open("it-raw-wiktextract-data.jsonl").unwrap();
+    let reader = BufReader::new(f);
+    let lines = reader.lines();
     let unwanted_pos = vec!["proverb"];
     let wanted_lang = "es";
+    let wanted_lang = "it";
+    //let wanted_lang = "en";
     let mut aggregated_words: HashMap<String, AggregatedWord> = HashMap::new();
 
+    let s = Instant::now();
     for line in lines {
+        let line = line.unwrap();
         if line.len() == 0 {
             continue;
         }
 
-        let word: WordEntry = serde_json::from_str(line).unwrap();
+        let word: WordEntry = serde_json::from_str(&line).unwrap();
         match word.lang_code {
             None => continue,
             Some(lang_code) => {
@@ -159,7 +175,7 @@ fn build_index() -> HashMap<String, AggregatedWord> {
         // ^^ parseable
         // vv parse
         // println!("{line}");
-        let word: WordEntryComplete = serde_json::from_str(line).unwrap();
+        let word: WordEntryComplete = serde_json::from_str(&line).unwrap();
         // no definitions, not the most useful dictionary
         if word.senses.iter().all(|s| s.glosses.is_none()) {
             continue;
@@ -192,6 +208,7 @@ fn build_index() -> HashMap<String, AggregatedWord> {
             if ipa_strings.is_empty() {
                 None
             } else {
+                // TODO: dedup
                 Some(ipa_strings)
             }
         } else {
@@ -243,6 +260,8 @@ fn build_index() -> HashMap<String, AggregatedWord> {
             });
     }
 
+    println!("stage 1 {:?}", s.elapsed());
+
     // some verbs have a `form_of` referencing a word that's not yet on the dictionary
     // remove it. presenting a 404 link to the user is terrible
     let word_keys: HashSet<String> = aggregated_words.keys().cloned().collect();
@@ -254,6 +273,7 @@ fn build_index() -> HashMap<String, AggregatedWord> {
             }
         }
     }
+    println!("stage 2 {:?}", s.elapsed());
 
     aggregated_words
 }
