@@ -108,7 +108,6 @@ impl<'a> DictionaryReader<'a> {
         let mut pos = 0;
 
         while pos < self.level1_data.len() {
-            // Read UTF-8 character
             let char_start = pos;
             let first_byte = self.level1_data[pos];
             let char_len = if first_byte < 0x80 {
@@ -172,26 +171,47 @@ impl<'a> DictionaryReader<'a> {
         self.decoder.set_offset_limit(group_end as u64)?;
         let mut decompressed = Vec::new();
         std::io::copy(&mut self.decoder, &mut decompressed)?;
-        println!("dec size l2 {}", decompressed.len());
 
-        // Search in decompressed group data
         let mut pos = 0;
+        let mut current_word = String::new();
+
         while pos < decompressed.len() {
-            if pos + 1 > decompressed.len() {
+            if pos + 2 > decompressed.len() {
                 break;
             }
 
-            let word_len = decompressed[pos] as usize;
+            // Read restart_flag(1bit) + shared_prefix_len(7bits)
+            let prefix_byte = decompressed[pos];
+            let is_restart = (prefix_byte & 0x80) != 0;
+            let shared_len = (prefix_byte & 0x7F) as usize;
             pos += 1;
 
-            if pos + word_len + 6 > decompressed.len() {
+            let suffix_len = decompressed[pos] as usize;
+            pos += 1;
+
+            if pos + suffix_len + 6 > decompressed.len() {
                 break;
             }
 
-            let entry_word =
-                unsafe { std::str::from_utf8_unchecked(&decompressed[pos..pos + word_len]) };
-            pos += word_len;
+            let suffix =
+                unsafe { std::str::from_utf8_unchecked(&decompressed[pos..pos + suffix_len]) };
+            pos += suffix_len;
 
+            if is_restart && shared_len == 0 {
+                // For restart entries, reconstruct from the last restart word + current shared_len + suffix
+                current_word = suffix.to_string();
+            } else {
+                // For non-restart entries, use shared_len from current restart word
+                let truncate_pos = current_word
+                    .char_indices()
+                    .nth(shared_len)
+                    .map(|(pos, _)| pos)
+                    .unwrap_or(current_word.len());
+                current_word.truncate(truncate_pos);
+                current_word.push_str(suffix);
+            }
+
+            // Read JSON offset and size
             let offset_bytes = &decompressed[pos..pos + 4];
             let json_offset = u32::from_le_bytes([
                 offset_bytes[0],
@@ -205,7 +225,7 @@ impl<'a> DictionaryReader<'a> {
             let json_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]);
             pos += 2;
 
-            if entry_word == word {
+            if current_word == word {
                 return Ok(Some((json_offset, json_size)));
             }
         }

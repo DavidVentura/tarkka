@@ -5,17 +5,39 @@ use std::time::Instant;
 use tarkka::{AggregatedWord, PosGlosses, WordEntry, WordEntryComplete};
 
 fn main() {
-    let words = build_index();
-    write(words);
+    let lang = "it";
+    let file = File::create(format!("{lang}-dictionary.dict")).unwrap();
+    let words = build_index(lang);
+    write(file, words);
 }
 
-fn write(aggregated_words: HashMap<String, AggregatedWord>) {
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+fn split_at_char_boundary(s: &str, char_index: usize) -> &str {
+    if char_index == 0 {
+        return s;
+    }
+    let mut char_indices = s.char_indices();
+    for _ in 0..char_index {
+        if char_indices.next().is_none() {
+            return s;
+        }
+    }
+    if let Some((byte_index, _)) = char_indices.next() {
+        &s[byte_index..]
+    } else {
+        ""
+    }
+}
+
+fn write(mut file: File, aggregated_words: HashMap<String, AggregatedWord>) {
     let s = Instant::now();
     let mut sorted_words: Vec<_> = aggregated_words.values().collect();
     sorted_words.sort_by(|a, b| a.word.cmp(&b.word));
     println!("sorted {:?}", s.elapsed());
 
-    // Serialize all words once and store with the word data
     let mut words_with_json: Vec<(&AggregatedWord, String)> =
         Vec::with_capacity(sorted_words.len());
     for word in &sorted_words {
@@ -40,10 +62,14 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
             .or_default()
             .push((word, json.len() as u16));
     }
+
+    for group in groups.values_mut() {
+        group.sort_by(|a, b| a.0.word.cmp(&b.0.word));
+    }
     println!("grouped {:?}", s.elapsed());
     println!("total word len {word_size}");
 
-    let mut level1_data = Vec::with_capacity(1024);
+    let mut level1_data = Vec::with_capacity(4096);
 
     let mut output = Vec::with_capacity(32 * 1024 * 1024);
     let mut encoder = zeekstd::Encoder::new(&mut output).unwrap();
@@ -52,28 +78,49 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     let mut max_jo = 0;
     let mut current_json_offset: u32 = 0;
 
+    let mut shared_prefixes = 0;
+
     for (first_char, words) in groups {
         let mut l2_raw_size = 0u32;
-        for (word, json_size) in words {
-            // Format: [word_len][word][offset_in_json_data][json_size]
+        let mut restart_word = "";
+        let mut word_count = 0u32;
 
-            // L2 index per-word overhead = 7b
-            // could optimize skipping `first_char`, -1b (some are >1b, but negligible)
-            // json_offset is relative to the raw file, so 2**28 is normal
-            // it _could_ be offset to the first of its sector
-            // then offset could be 3 bytes
-            assert!(word.word.len() <= 255);
-            encoder.write(&[word.word.len() as u8]).unwrap();
-            encoder.write(word.word.as_bytes()).unwrap();
+        for (word, json_size) in words {
+            let current_word = &word.word;
+            let shared_len = if word_count == 0 {
+                0
+            } else {
+                common_prefix_len(restart_word, current_word)
+            };
+
+            let needs_restart = shared_len < 4 || word_count == 0;
+            let restart_flag = if needs_restart { 0x80u8 } else { 0x00u8 };
+            let suffix = split_at_char_boundary(current_word, shared_len);
+
+            shared_prefixes += shared_len;
+            // Format: [restart_flag(1bit) + shared_prefix_len(7bits)][suffix_len][suffix][offset][size]
+            assert!(shared_len <= 127, "Shared prefix too long: {}", shared_len);
+            assert!(suffix.len() <= 255, "Suffix too long: {}", suffix.len());
+
+            encoder.write(&[restart_flag | (shared_len as u8)]).unwrap();
+            encoder.write(&[suffix.len() as u8]).unwrap();
+            encoder.write(suffix.as_bytes()).unwrap();
             encoder
                 .write(current_json_offset.to_le_bytes().as_slice())
                 .unwrap();
             encoder
                 .write((json_size as u16).to_le_bytes().as_slice())
                 .unwrap();
+
             max_jo = std::cmp::max(max_jo, current_json_offset);
             current_json_offset = current_json_offset.checked_add(json_size as u32).unwrap();
-            l2_raw_size += 1 + word.word.len() as u32 + 4 + 2;
+            l2_raw_size += 1 + 1 + suffix.len() as u32 + 4 + 2;
+
+            // Update restart_word when we have a restart
+            if needs_restart {
+                restart_word = current_word;
+            }
+            word_count += 1;
         }
 
         // Level 1: [first_char_utf8_bytes][l2 offset u32][l2 size u32]
@@ -83,6 +130,7 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
 
         level2_size += l2_raw_size;
     }
+    println!("saved {shared_prefixes}b with prefix thing");
     println!("compressed {:?}", s.elapsed());
 
     println!("max_jo {max_jo} l2 sz {}", level2_size);
@@ -95,8 +143,6 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     }
     encoder.finish().unwrap();
     println!("finish compress {:?}", s.elapsed());
-
-    let mut file = File::create("dictionary.dict").unwrap();
 
     file.write_all(b"DICT").unwrap(); // magic
     file.write_all(&(level1_data.len() as u32).to_le_bytes())
@@ -122,16 +168,15 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     );
 }
 
-fn build_index() -> HashMap<String, AggregatedWord> {
+fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
     //let content = std::fs::read_to_string("./example-es.jsonl").unwrap();
     //let content = std::fs::read_to_string("./es-extract.jsonl").unwrap();
-    let f = File::open("it-raw-wiktextract-data.jsonl").unwrap();
+    //let f = File::open("it-raw-wiktextract-data.jsonl").unwrap();
+    let f = File::open(format!("{lang}-raw-wiktextract-data.jsonl")).unwrap();
     let reader = BufReader::new(f);
     let lines = reader.lines();
     let unwanted_pos = vec!["proverb"];
-    let wanted_lang = "es";
-    let wanted_lang = "it";
-    //let wanted_lang = "en";
+    let wanted_lang = lang;
     let mut aggregated_words: HashMap<String, AggregatedWord> = HashMap::new();
 
     let s = Instant::now();

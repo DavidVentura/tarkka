@@ -11,8 +11,8 @@ fn pretty_print(wn: &str, w: AggregatedWord) {
     };
 
     let hyphenation = match w.hyphenation {
-        Some(ref h) if h.len() > 0 => h.first().unwrap(),
-        _ => "",
+        Some(ref h) if h.len() > 0 => h.join("-"),
+        _ => "".into(),
     };
     println!("{wn} - {} - {}", ipa, hyphenation);
     for pg in w.pos_glosses {
@@ -25,12 +25,15 @@ fn pretty_print(wn: &str, w: AggregatedWord) {
 
 fn main() {
     let s = Instant::now();
-    let mut d = reader::DictionaryReader::open("dictionary.dict").unwrap();
+    let mut d = reader::DictionaryReader::open("it-dictionary.dict").unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
-    let r = d.lookup("Austria").unwrap();
+    let lookup = "abbaiare";
+    let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {
-        pretty_print("cane", w);
+        pretty_print(lookup, w);
+    } else {
+        println!("not found: '{lookup}'")
     };
 }
