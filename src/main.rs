@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
+use std::time::Instant;
+mod reader;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WordEntry {
@@ -32,7 +34,7 @@ struct Hyphenation {
     parts: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct AggregatedWord {
     word: String,
     pos_glosses: Vec<PosGlosses>,
@@ -47,6 +49,99 @@ struct PosGlosses {
 }
 
 fn main() {
+    //write();
+    let s = Instant::now();
+    let mut d = reader::DictionaryReader::open("dictionary.dict").unwrap();
+    println!("{:?}", s.elapsed());
+    let r = d.lookup("perro").unwrap();
+    println!("{:?}", s.elapsed());
+    println!("word = {r:?}");
+    let r = d.lookup("hola").unwrap();
+    println!("{:?}", s.elapsed());
+    println!("word = {r:?}");
+}
+
+fn write(aggregated_words: HashMap<String, AggregatedWord>) {
+    let mut sorted_words: Vec<_> = aggregated_words.values().collect();
+    sorted_words.sort_by(|a, b| a.word.cmp(&b.word));
+
+    let mut json_data = String::new();
+    let mut word_to_offset: HashMap<String, u32> = HashMap::new();
+    let mut current_offset: u32 = 0;
+
+    for word in &sorted_words {
+        word_to_offset.insert(word.word.clone(), current_offset);
+        let serialized = serde_json::to_string(word).unwrap();
+        json_data.push_str(&serialized);
+        json_data.push('\n');
+        current_offset += serialized.len() as u32 + 1;
+    }
+
+    let mut groups: BTreeMap<String, Vec<&AggregatedWord>> = BTreeMap::new();
+    for word in &sorted_words {
+        let first_char = word.word.chars().next().unwrap().to_string();
+        groups.entry(first_char).or_default().push(word);
+    }
+
+    let mut level1_data = Vec::new();
+    let mut level2_data = Vec::new();
+    let mut current_level2_offset: u32 = 0;
+
+    for (first_char, words) in groups {
+        let mut group_data = Vec::new();
+        for word in words {
+            // Format: [word_len][word][offset_in_json_data]
+            group_data.push(word.word.len() as u8);
+            group_data.extend(word.word.as_bytes());
+            let json_offset = word_to_offset[&word.word];
+            group_data.extend(json_offset.to_le_bytes());
+        }
+
+        let compressed_group = zstd::encode_all(group_data.as_slice(), 9).unwrap();
+
+        // Level 1: [first_char_utf8_bytes][l2 offset u32][l2 size u32]
+        level1_data.extend(first_char.as_bytes());
+        level1_data.extend(current_level2_offset.to_le_bytes());
+        level1_data.extend((compressed_group.len() as u32).to_le_bytes());
+
+        current_level2_offset += compressed_group.len() as u32;
+        level2_data.extend(compressed_group);
+    }
+
+    let compressed_json = zstd::encode_all(json_data.as_bytes(), 9).unwrap();
+
+    let mut file = File::create("dictionary.dict").unwrap();
+
+    file.write_all(b"DICT").unwrap(); // magic
+    file.write_all(&(level1_data.len() as u32).to_le_bytes())
+        .unwrap(); // level1 size
+    file.write_all(&(level2_data.len() as u32).to_le_bytes())
+        .unwrap(); // level2 size
+    file.write_all(&(compressed_json.len() as u32).to_le_bytes())
+        .unwrap(); // json data size
+
+    file.write_all(&level1_data).unwrap();
+    file.write_all(&level2_data).unwrap();
+    file.write_all(&compressed_json).unwrap();
+
+    println!(
+        "Created dictionary.dict with {} words",
+        aggregated_words.len()
+    );
+    println!("Level 1 size: {} bytes", level1_data.len());
+    println!("Level 2 size: {} bytes", level2_data.len());
+    println!(
+        "JSON data size: {} bytes (compressed from {})",
+        compressed_json.len(),
+        json_data.len()
+    );
+    println!(
+        "Total file size: {} bytes",
+        16 + level1_data.len() + level2_data.len() + compressed_json.len()
+    );
+}
+
+fn build_index() -> HashMap<String, AggregatedWord> {
     //let content = std::fs::read_to_string("./example-es.jsonl").unwrap();
     let content = std::fs::read_to_string("./es-extract.jsonl").unwrap();
     let lines = content.split('\n');
@@ -154,54 +249,5 @@ fn main() {
         }
     }
 
-    // the dictionary is JSONL
-    // the index is [<word>\0<u32 offset>]
-    let mut json_data = String::new();
-    let mut index_data = Vec::with_capacity(16 * 1024 * 1024); // 16MB index is a reasonable
-    // starting point
-    let mut current_offset: u32 = 0;
-
-    let mut sorted_words: Vec<_> = aggregated_words.values().collect();
-    sorted_words.sort_by(|a, b| a.word.cmp(&b.word));
-
-    for aggregated_word in sorted_words {
-        index_data.extend(aggregated_word.word.as_bytes());
-        index_data.push(0);
-        index_data.extend(u32::to_le_bytes(current_offset));
-
-        let serialized = serde_json::to_string(&aggregated_word).unwrap();
-        json_data.push_str(&serialized);
-        json_data.push('\n');
-
-        current_offset += serialized.len() as u32 + 1; // +1 for newline
-    }
-
-    let compressed_data = zstd::encode_all(json_data.as_bytes(), 9).unwrap();
-
-    let mut file = File::create("dictionary.dict").unwrap();
-    let mut file2 = File::create("dictionary.zstd").unwrap();
-    let mut idx = File::create("index").unwrap();
-
-    file.write_all(b"DICT").unwrap(); // magic
-    file.write_all(&(index_data.len() as u32).to_le_bytes())
-        .unwrap();
-    file.write_all(&(compressed_data.len() as u32).to_le_bytes())
-        .unwrap();
-
-    file.write_all(&index_data).unwrap();
-    idx.write_all(&index_data).unwrap();
-
-    file.write_all(&compressed_data).unwrap();
-    file2.write_all(&compressed_data).unwrap();
-
-    println!(
-        "Created dictionary.dict with {} words",
-        aggregated_words.len()
-    );
-    println!("Original JSON size: {} bytes", json_data.len());
-    println!(
-        "Compressed size: {} bytes ({:.1}x compression)",
-        compressed_data.len(),
-        (json_data.len() as f64 / compressed_data.len() as f64) * 100.0
-    );
+    aggregated_words
 }
