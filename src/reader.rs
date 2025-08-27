@@ -1,13 +1,42 @@
-use std::io::{Cursor, Read};
-use std::time::Instant;
+use std::io::{Read, SeekFrom};
 use std::{fs::File, io::Seek};
 use tarkka::{AggregatedWord, HEADER_SIZE};
+
+struct OffsetFile {
+    file: File,
+    base_offset: u64,
+}
+
+impl OffsetFile {
+    fn new(mut file: File, base_offset: u64) -> std::io::Result<Self> {
+        file.seek(SeekFrom::Start(base_offset))?;
+        Ok(Self { file, base_offset })
+    }
+}
+
+impl Read for OffsetFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for OffsetFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let adjusted_pos = match pos {
+            SeekFrom::Start(offset) => SeekFrom::Start(self.base_offset + offset),
+            SeekFrom::Current(offset) => SeekFrom::Current(offset),
+            SeekFrom::End(offset) => SeekFrom::End(offset),
+        };
+        let result = self.file.seek(adjusted_pos)?;
+        Ok(result - self.base_offset)
+    }
+}
 
 pub struct DictionaryReader<'a> {
     level1_data: Vec<u8>,
     level2_size: u32,
     json_off: u32,
-    decoder: zeekstd::Decoder<'a, Cursor<Vec<u8>>>,
+    decoder: zeekstd::Decoder<'a, OffsetFile>,
 }
 
 impl<'a> DictionaryReader<'a> {
@@ -34,14 +63,9 @@ impl<'a> DictionaryReader<'a> {
         let mut level1_data = vec![0u8; level1_size as usize];
         file.read_exact(&mut level1_data)?;
 
-        // TODO wrap offset instead of reading the whole thing
         let level2_off = level1_size + HEADER_SIZE as u32;
-        file.seek(std::io::SeekFrom::Start(level2_off as u64))?;
-
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
-        let c = Cursor::new(buf);
-        let decoder = zeekstd::Decoder::new(c).unwrap();
+        let offset_file = OffsetFile::new(file, level2_off as u64)?;
+        let decoder = zeekstd::Decoder::new(offset_file).unwrap();
 
         let json_off = level2_size;
         Ok(DictionaryReader {
@@ -164,7 +188,8 @@ impl<'a> DictionaryReader<'a> {
                 break;
             }
 
-            let entry_word = std::str::from_utf8(&decompressed[pos..pos + word_len])?;
+            let entry_word =
+                unsafe { std::str::from_utf8_unchecked(&decompressed[pos..pos + word_len]) };
             pos += word_len;
 
             let offset_bytes = &decompressed[pos..pos + 4];
