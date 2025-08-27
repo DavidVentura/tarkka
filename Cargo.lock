@@ -156,7 +156,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "zstd",
+ "zeekstd",
 ]
 
 [[package]]
@@ -184,10 +184,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd"
-version = "0.13.3"
+name = "zeekstd"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "f59a97e51f9164e18e1cf430ca8cb456eb12c04ba7f848d89792ace1a9cd4f13"
 dependencies = [
  "zstd-safe",
 ]

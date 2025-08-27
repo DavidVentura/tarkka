@@ -1,16 +1,16 @@
-use crate::AggregatedWord;
-use std::fs::File;
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::time::Instant;
+use std::{fs::File, io::Seek};
+use tarkka::{AggregatedWord, HEADER_SIZE};
 
-pub struct DictionaryReader {
+pub struct DictionaryReader<'a> {
     level1_data: Vec<u8>,
-    level2_data: Vec<u8>,
-    compressed_json: Vec<u8>,
-    decompressed_json: Option<String>,
+    level2_size: u32,
+    json_off: u32,
+    decoder: zeekstd::Decoder<'a, Cursor<Vec<u8>>>,
 }
 
-impl DictionaryReader {
+impl<'a> DictionaryReader<'a> {
     pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut file = File::open(path)?;
 
@@ -23,28 +23,32 @@ impl DictionaryReader {
         let mut size_buf = [0u8; 4];
 
         file.read_exact(&mut size_buf)?;
-        let level1_size = u32::from_le_bytes(size_buf) as usize;
+        let level1_size = u32::from_le_bytes(size_buf);
 
         file.read_exact(&mut size_buf)?;
-        let level2_size = u32::from_le_bytes(size_buf) as usize;
+        let level2_size = u32::from_le_bytes(size_buf);
 
         file.read_exact(&mut size_buf)?;
-        let json_size = u32::from_le_bytes(size_buf) as usize;
+        let _json_size = u32::from_le_bytes(size_buf);
 
-        let mut level1_data = vec![0u8; level1_size];
+        let mut level1_data = vec![0u8; level1_size as usize];
         file.read_exact(&mut level1_data)?;
 
-        let mut level2_data = vec![0u8; level2_size];
-        file.read_exact(&mut level2_data)?;
+        // TODO wrap offset instead of reading the whole thing
+        let level2_off = level1_size + HEADER_SIZE as u32;
+        file.seek(std::io::SeekFrom::Start(level2_off as u64))?;
 
-        let mut compressed_json = vec![0u8; json_size];
-        file.read_exact(&mut compressed_json)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        let c = Cursor::new(buf);
+        let decoder = zeekstd::Decoder::new(c).unwrap();
 
+        let json_off = level2_size;
         Ok(DictionaryReader {
             level1_data,
-            level2_data,
-            compressed_json,
-            decompressed_json: None,
+            level2_size,
+            json_off,
+            decoder,
         })
     }
 
@@ -60,12 +64,16 @@ impl DictionaryReader {
             None => return Ok(None),
         };
 
-        let json_offset = self.find_in_level2_group(level2_offset, group_size, word)?;
-        if json_offset.is_none() {
+        let result = self.find_in_level2_group(level2_offset, group_size, word)?;
+        if result.is_none() {
             return Ok(None);
         }
 
-        self.get_word_from_json(json_offset.unwrap(), word)
+        let (json_offset, json_size) = result.unwrap();
+        match self.get_word_from_json(json_offset + self.json_off, json_size) {
+            Ok(w) => Ok(Some(w)),
+            Err(e) => Err(e),
+        }
     }
 
     fn find_level2_offset(
@@ -124,20 +132,23 @@ impl DictionaryReader {
     }
 
     fn find_in_level2_group(
-        &self,
+        &mut self,
         group_offset: u32,
         group_size: u32,
         word: &str,
-    ) -> Result<Option<u32>, Box<dyn std::error::Error>> {
-        let group_start = group_offset as usize;
-        let group_end = group_start + group_size as usize;
+    ) -> Result<Option<(u32, u16)>, Box<dyn std::error::Error>> {
+        let group_start = group_offset;
+        let group_end = group_start + group_size;
 
-        if group_start >= self.level2_data.len() || group_end > self.level2_data.len() {
+        if group_start >= self.level2_size || group_end > self.level2_size {
             return Ok(None);
         }
 
-        let compressed_group = &self.level2_data[group_start..group_end];
-        let decompressed = zstd::decode_all(compressed_group)?;
+        self.decoder.set_offset(group_start as u64)?;
+        self.decoder.set_offset_limit(group_end as u64)?;
+        let mut decompressed = Vec::new();
+        std::io::copy(&mut self.decoder, &mut decompressed)?;
+        println!("dec size l2 {}", decompressed.len());
 
         // Search in decompressed group data
         let mut pos = 0;
@@ -149,7 +160,7 @@ impl DictionaryReader {
             let word_len = decompressed[pos] as usize;
             pos += 1;
 
-            if pos + word_len + 4 > decompressed.len() {
+            if pos + word_len + 6 > decompressed.len() {
                 break;
             }
 
@@ -165,8 +176,12 @@ impl DictionaryReader {
             ]);
             pos += 4;
 
+            let size_bytes = &decompressed[pos..pos + 2];
+            let json_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]);
+            pos += 2;
+
             if entry_word == word {
-                return Ok(Some(json_offset));
+                return Ok(Some((json_offset, json_size)));
             }
         }
 
@@ -176,34 +191,17 @@ impl DictionaryReader {
     fn get_word_from_json(
         &mut self,
         offset: u32,
-        word: &str,
-    ) -> Result<Option<AggregatedWord>, Box<dyn std::error::Error>> {
-        if self.decompressed_json.is_none() {
-            let s = Instant::now();
-            let decompressed = zstd::decode_all(self.compressed_json.as_slice())?;
-            println!("decompressed = {:?}", s.elapsed());
-            self.decompressed_json = Some(unsafe { String::from_utf8_unchecked(decompressed) });
-            println!("stringed = {:?}", s.elapsed());
-        }
+        size: u16,
+    ) -> Result<AggregatedWord, Box<dyn std::error::Error>> {
+        let mut decompressed = Vec::new();
+        self.decoder.set_offset(offset as u64)?;
+        self.decoder.set_offset_limit(offset as u64 + size as u64)?;
+        std::io::copy(&mut self.decoder, &mut decompressed)?;
 
-        let json_data = self.decompressed_json.as_ref().unwrap();
-        let offset = offset as usize;
+        let json_entry = unsafe { String::from_utf8_unchecked(decompressed) };
+        let parsed: AggregatedWord =
+            serde_json::from_str(&json_entry).expect("failed to JSON decode");
 
-        if offset >= json_data.len() {
-            return Ok(None);
-        }
-
-        let line_end = json_data[offset..]
-            .find('\n')
-            .unwrap_or(json_data.len() - offset);
-        let line = &json_data[offset..offset + line_end];
-
-        let parsed: AggregatedWord = serde_json::from_str(line)?;
-
-        if parsed.word == word {
-            Ok(Some(parsed))
-        } else {
-            Ok(None)
-        }
+        Ok(parsed)
     }
 }
