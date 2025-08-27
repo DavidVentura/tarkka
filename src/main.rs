@@ -21,7 +21,7 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
         word_to_offset.insert(word.word.clone(), current_offset);
         let serialized = serde_json::to_string(word).unwrap();
         json_data.push_str(&serialized);
-        current_offset += serialized.len() as u32;
+        current_offset = current_offset.checked_add(serialized.len() as u32).unwrap();
     }
 
     let mut groups: BTreeMap<String, Vec<&AggregatedWord>> = BTreeMap::new();
