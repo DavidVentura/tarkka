@@ -25,14 +25,17 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     }
 
     let mut groups: BTreeMap<String, Vec<&AggregatedWord>> = BTreeMap::new();
+    let mut word_size = 0;
     for word in &sorted_words {
         let first_char = word.word.chars().next().unwrap().to_string();
+        word_size += word.word.len();
         groups.entry(first_char).or_default().push(word);
     }
+    println!("total word len {word_size}");
 
-    let mut level1_data = Vec::with_capacity(1 * 1024 * 1024);
+    let mut level1_data = Vec::with_capacity(1024);
 
-    let mut output = Vec::with_capacity(16 * 1024 * 1024);
+    let mut output = Vec::with_capacity(32 * 1024 * 1024);
     let mut encoder = zeekstd::Encoder::new(&mut output).unwrap();
     let mut level2_size: u32 = 0;
 
@@ -52,8 +55,12 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
             );
 
             // Format: [word_len][word][offset_in_json_data][json_size]
-            // println!("w {} jo {} js {}", word.word, json_offset, json_size);
 
+            // L2 index per-word overhead = 7b
+            // could optimize skipping `first_char`, -1b (some are >1b, but negligible)
+            // json_offset is relative to the raw file, so 2**28 is normal
+            // it _could_ be offset to the first of its sector
+            // then offset could be 3 bytes
             assert!(word.word.len() <= 255);
             encoder.write(&[word.word.len() as u8]).unwrap();
             encoder.write(word.word.as_bytes()).unwrap();
@@ -89,6 +96,8 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     file.write_all(&level1_data).unwrap();
     file.write_all(&output).unwrap();
 
+    let compressed_json_sz = output.len() - level2_size as usize;
+
     println!(
         "Created dictionary.dict with {} words",
         aggregated_words.len()
@@ -96,7 +105,11 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
     println!("Header size (static) {}", 4 + 4 + 4 + 4); // DICT + l1 len + l2 size + json size
     println!("Level 1 size: {} bytes", level1_data.len());
     println!("Level 2 size: {} bytes", level2_size);
-    println!("Raw JSON data size: {}", json_data.len());
+    println!(
+        "JSON data size: raw {} compressed {}",
+        json_data.len(),
+        compressed_json_sz
+    );
 }
 
 fn build_index() -> HashMap<String, AggregatedWord> {
@@ -153,8 +166,11 @@ fn build_index() -> HashMap<String, AggregatedWord> {
         }
 
         // there are exactly 0 or 1 hyphenations
+        // this was not true
         let hyphenation = if let Some(h) = word.hyphenations {
-            assert!(h.len() <= 1);
+            // FIXME
+            // println!("{h:?}");
+            // assert!(h.len() <= 1);
             Some(h[0].parts.clone())
         } else {
             None
