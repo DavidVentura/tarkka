@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Write;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WordEntry {
@@ -140,7 +142,8 @@ fn main() {
             });
     }
 
-    // Filter form_of to only include words that exist in our dictionary
+    // some verbs have a `form_of` referencing a word that's not yet on the dictionary
+    // remove it. presenting a 404 link to the user is terrible
     let word_keys: HashSet<String> = aggregated_words.keys().cloned().collect();
     for aggregated_word in aggregated_words.values_mut() {
         if let Some(form_of) = &mut aggregated_word.form_of {
@@ -151,8 +154,54 @@ fn main() {
         }
     }
 
-    for aggregated_word in aggregated_words.values() {
+    // the dictionary is JSONL
+    // the index is [<word>\0<u32 offset>]
+    let mut json_data = String::new();
+    let mut index_data = Vec::with_capacity(16 * 1024 * 1024); // 16MB index is a reasonable
+    // starting point
+    let mut current_offset: u32 = 0;
+
+    let mut sorted_words: Vec<_> = aggregated_words.values().collect();
+    sorted_words.sort_by(|a, b| a.word.cmp(&b.word));
+
+    for aggregated_word in sorted_words {
+        index_data.extend(aggregated_word.word.as_bytes());
+        index_data.push(0);
+        index_data.extend(u32::to_le_bytes(current_offset));
+
         let serialized = serde_json::to_string(&aggregated_word).unwrap();
-        println!("{}", serialized);
+        json_data.push_str(&serialized);
+        json_data.push('\n');
+
+        current_offset += serialized.len() as u32 + 1; // +1 for newline
     }
+
+    let compressed_data = zstd::encode_all(json_data.as_bytes(), 9).unwrap();
+
+    let mut file = File::create("dictionary.dict").unwrap();
+    let mut file2 = File::create("dictionary.zstd").unwrap();
+    let mut idx = File::create("index").unwrap();
+
+    file.write_all(b"DICT").unwrap(); // magic
+    file.write_all(&(index_data.len() as u32).to_le_bytes())
+        .unwrap();
+    file.write_all(&(compressed_data.len() as u32).to_le_bytes())
+        .unwrap();
+
+    file.write_all(&index_data).unwrap();
+    idx.write_all(&index_data).unwrap();
+
+    file.write_all(&compressed_data).unwrap();
+    file2.write_all(&compressed_data).unwrap();
+
+    println!(
+        "Created dictionary.dict with {} words",
+        aggregated_words.len()
+    );
+    println!("Original JSON size: {} bytes", json_data.len());
+    println!(
+        "Compressed size: {} bytes ({:.1}x compression)",
+        compressed_data.len(),
+        (json_data.len() as f64 / compressed_data.len() as f64) * 100.0
+    );
 }
