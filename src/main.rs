@@ -171,6 +171,17 @@ fn build_index() -> HashMap<String, AggregatedWord> {
             }
         }
 
+        let ipa_sound = if let Some(sounds) = &word.sounds {
+            let ipa_strings: Vec<String> = sounds.iter().filter_map(|s| s.ipa.clone()).collect();
+            if ipa_strings.is_empty() {
+                None
+            } else {
+                Some(ipa_strings)
+            }
+        } else {
+            None
+        };
+
         let form_of = if all_form_of.is_empty() {
             None
         } else {
@@ -196,6 +207,13 @@ fn build_index() -> HashMap<String, AggregatedWord> {
                         agg.form_of = Some(form_of.clone());
                     }
                 }
+                if let Some(ipa_sound) = &ipa_sound {
+                    if let Some(existing_ipa_sound) = &mut agg.ipa_sound {
+                        existing_ipa_sound.extend(ipa_sound.clone());
+                    } else {
+                        agg.ipa_sound = Some(ipa_sound.clone());
+                    }
+                }
             })
             .or_insert(AggregatedWord {
                 word: word.word.clone(),
@@ -205,6 +223,7 @@ fn build_index() -> HashMap<String, AggregatedWord> {
                 }],
                 hyphenation,
                 form_of,
+                ipa_sound,
             });
     }
 

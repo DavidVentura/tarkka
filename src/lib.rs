@@ -14,6 +14,7 @@ pub struct WordEntryComplete {
     pub word: String,
     pub senses: Vec<Sense>,
     pub hyphenations: Option<Vec<Hyphenation>>,
+    pub sounds: Option<Vec<Sound>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -28,6 +29,11 @@ pub struct FormOf {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct Sound {
+    pub ipa: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Hyphenation {
     pub parts: Vec<String>,
 }
@@ -39,6 +45,7 @@ pub struct AggregatedWord {
     pub pos_glosses: Vec<PosGlosses>,
     pub hyphenation: Option<Vec<String>>,
     pub form_of: Option<Vec<String>>,
+    pub ipa_sound: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
