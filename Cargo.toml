@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "test_decompress"
-path = "src/test_decompress.rs"
-
-[[bin]]
 name = "lookup"
 path = "src/lookup.rs"
 

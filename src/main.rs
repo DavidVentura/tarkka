@@ -88,8 +88,6 @@ fn write(aggregated_words: HashMap<String, AggregatedWord>) {
 
     file.write_all(&level1_data).unwrap();
     file.write_all(&output).unwrap();
-    let mut file2 = File::create("out2").unwrap();
-    file2.write_all(&output).unwrap();
 
     println!(
         "Created dictionary.dict with {} words",
