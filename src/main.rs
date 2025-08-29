@@ -5,7 +5,7 @@ use std::time::Instant;
 use tarkka::{AggregatedWord, PosGlosses, WordEntry, WordEntryComplete};
 
 fn main() {
-    let lang = "en";
+    let lang = "it";
     let good_words = match File::open(format!("filtered-{lang}-raw-wiktextract-data.jsonl")) {
         Ok(mut f) => {
             println!("parsing json from pre-filtered");
@@ -43,51 +43,41 @@ fn main() {
 }
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
-    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
-}
-
-fn split_at_char_boundary(s: &str, char_index: usize) -> &str {
-    if char_index == 0 {
-        return s;
-    }
-    let mut char_indices = s.char_indices();
-    for _ in 0..char_index {
-        if char_indices.next().is_none() {
-            return s;
-        }
-    }
-    if let Some((byte_index, _)) = char_indices.next() {
-        &s[byte_index..]
-    } else {
-        ""
-    }
+    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
 fn write(mut file: File, sorted_words: Vec<AggregatedWord>) {
-    let mut words_with_json: Vec<(&AggregatedWord, String)> =
+    let mut words_with_ser: Vec<(&AggregatedWord, Vec<u8>)> =
         Vec::with_capacity(sorted_words.len());
     let s = Instant::now();
     for word in &sorted_words {
-        let serialized = serde_json::to_string(word).unwrap();
-        words_with_json.push((word, serialized));
+        // let serialized = serde_json::to_string(word).unwrap().as_bytes().to_vec();
+        let serialized = word.serialize();
+        words_with_ser.push((word, serialized));
     }
     println!("serialized {:?}", s.elapsed());
 
-    let mut groups: BTreeMap<String, Vec<(&AggregatedWord, u16)>> = BTreeMap::new();
+    let mut groups: BTreeMap<[u8; 3], Vec<(&AggregatedWord, u16)>> = BTreeMap::new();
     let mut word_size = 0;
-    for (word, json) in &words_with_json {
-        let first_char = word.word.chars().next().unwrap().to_string();
+    for (word, ser) in &words_with_ser {
+        let b = word.word.as_bytes();
+        let l1_group = match b.len() {
+            0 => panic!("got empty word"),
+            1 => [0, 0, b[0]],
+            2 => [0, b[0], b[1]],
+            _ => [b[0], b[1], b[2]],
+        };
         word_size += word.word.len();
         assert!(
-            json.len() <= u16::MAX as usize,
+            ser.len() <= u16::MAX as usize,
             "JSON entry too large: {} bytes for word '{}'",
-            json.len(),
+            ser.len(),
             word.word
         );
         groups
-            .entry(first_char)
+            .entry(l1_group)
             .or_default()
-            .push((word, json.len() as u16));
+            .push((word, ser.len() as u16));
     }
 
     for group in groups.values_mut() {
@@ -102,71 +92,55 @@ fn write(mut file: File, sorted_words: Vec<AggregatedWord>) {
     let mut encoder = zeekstd::Encoder::new(&mut output).unwrap();
     let mut level2_size: u32 = 0;
 
-    let mut max_jo = 0;
-    let mut current_json_offset: u32 = 0;
-
     let mut shared_prefixes = 0;
 
-    for (first_char, words) in groups {
+    for (l1_group, words) in groups {
         let mut l2_raw_size = 0u32;
-        let mut restart_word = "";
-        let mut word_count = 0u32;
+        let mut prev_word = "";
 
-        for (word, json_size) in words {
+        for (word, ser_size) in words {
             let current_word = &word.word;
-            let shared_len = if word_count == 0 {
-                0
-            } else {
-                common_prefix_len(restart_word, current_word)
-            };
+            let shared_len = common_prefix_len(prev_word, current_word);
 
-            let needs_restart = shared_len < 4 || word_count == 0;
-            let restart_flag = if needs_restart { 0x80u8 } else { 0x00u8 };
-            let suffix = split_at_char_boundary(current_word, shared_len);
+            let suffix = &current_word.as_bytes()[shared_len..];
 
             shared_prefixes += shared_len;
-            // Format: [restart_flag(1bit) + shared_prefix_len(7bits)][suffix_len][suffix][offset][size]
+            // Format: [shared_prefix_len(1b)][suffix_len 1b][suffix][size 2b]
             assert!(shared_len <= 127, "Shared prefix too long: {}", shared_len);
             assert!(suffix.len() <= 255, "Suffix too long: {}", suffix.len());
 
-            encoder.write(&[restart_flag | (shared_len as u8)]).unwrap();
+            encoder.write(&[shared_len as u8]).unwrap();
             encoder.write(&[suffix.len() as u8]).unwrap();
-            encoder.write(suffix.as_bytes()).unwrap();
-            encoder
-                .write(current_json_offset.to_le_bytes().as_slice())
-                .unwrap();
-            encoder
-                .write((json_size as u16).to_le_bytes().as_slice())
-                .unwrap();
+            encoder.write(suffix).unwrap();
+            let entry_size = ser_size.to_le_bytes();
+            encoder.write(&entry_size).unwrap();
 
-            max_jo = std::cmp::max(max_jo, current_json_offset);
-            current_json_offset = current_json_offset.checked_add(json_size as u32).unwrap();
-            l2_raw_size += 1 + 1 + suffix.len() as u32 + 4 + 2;
+            let fixed_ovh = 1 + 1 + entry_size.len();
+            debug_assert!(fixed_ovh <= 4);
+            let entry_size = suffix.len() + fixed_ovh;
+            l2_raw_size += entry_size as u32;
 
-            // Update restart_word when we have a restart
-            if needs_restart {
-                restart_word = current_word;
-            }
-            word_count += 1;
+            prev_word = current_word;
         }
 
-        // Level 1: [first_char_utf8_bytes][l2 offset u32][l2 size u32]
-        level1_data.extend(first_char.as_bytes());
-        level1_data.extend(level2_size.to_le_bytes());
+        // Level 1: [first two bytes][l2 size u32]
+        // the leading byte may be zero, discard it
+        level1_data.extend(&l1_group);
+        // 96% fits in u14; 99.3% in u16, 100% in u24
+        // but L1 is REALLY not worth optimizing atm
+        // maybe 800 L1 entries with 2b, 4500 with 3b
         level1_data.extend(l2_raw_size.to_le_bytes());
 
-        level2_size += l2_raw_size;
+        level2_size += l2_raw_size as u32;
     }
     println!("saved {shared_prefixes}b with prefix thing");
     println!("compressed {:?}", s.elapsed());
 
-    println!("max_jo {max_jo} l2 sz {}", level2_size);
-
     // Write all JSON data to encoder
-    let mut total_json_size = 0u32;
-    for (_, serialized_json) in &words_with_json {
-        encoder.write_all(serialized_json.as_bytes()).unwrap();
-        total_json_size += serialized_json.len() as u32;
+    let mut total_ser_size = 0u32;
+    for (_, ser) in &words_with_ser {
+        encoder.write_all(ser).unwrap();
+        total_ser_size += ser.len() as u32;
     }
     encoder.finish().unwrap();
     println!("finish compress {:?}", s.elapsed());
@@ -175,20 +149,20 @@ fn write(mut file: File, sorted_words: Vec<AggregatedWord>) {
     file.write_all(&(level1_data.len() as u32).to_le_bytes())
         .unwrap(); // level1 size
     file.write_all(&(level2_size as u32).to_le_bytes()).unwrap(); // level2 size
-    file.write_all(&total_json_size.to_le_bytes()).unwrap(); // json data size
+    file.write_all(&total_ser_size.to_le_bytes()).unwrap(); // json data size
 
     file.write_all(&level1_data).unwrap();
     file.write_all(&output).unwrap();
 
-    let compressed_json_sz = output.len() - level2_size as usize;
+    let compressed_ser_sz = output.len() - level2_size as usize;
 
     println!("Created dictionary.dict with {} words", sorted_words.len());
-    println!("Header size (static) {}", 4 + 4 + 4 + 4); // DICT + l1 len + l2 size + json size
+    println!("Header size (static) {}", 4 + 4 + 4 + 4); // DICT + l1 len + l2 size + ser size
     println!("Level 1 size: {} bytes", level1_data.len());
     println!("Level 2 size: {} bytes", level2_size);
     println!(
-        "JSON data size: raw {} compressed {}",
-        total_json_size, compressed_json_sz
+        "data size: raw {} compressed {}",
+        total_ser_size, compressed_ser_sz
     );
 }
 
@@ -215,7 +189,8 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComple
         }
         match word.word {
             Some(w) => {
-                if w.contains(" ") {
+                // special chinese comma
+                if w.contains(" ") || w.contains("，") {
                     // phrases, like 'animal doméstico' don't make sense
                     // in a WORD dictionary
                     continue;
@@ -299,12 +274,20 @@ fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
             .and_modify(|agg| {
                 if let Some(existing_pos) = agg.pos_glosses.iter_mut().find(|pg| pg.pos == word.pos)
                 {
-                    existing_pos.glosses.extend(all_glosses.clone());
+                    if (existing_pos.glosses.len() + all_glosses.len()) >= 256 {
+                        println!("WTF? extend {word:?}");
+                    } else {
+                        existing_pos.glosses.extend(all_glosses.clone());
+                    }
                 } else {
-                    agg.pos_glosses.push(PosGlosses {
-                        pos: word.pos.clone(),
-                        glosses: all_glosses.clone(),
-                    });
+                    if all_glosses.len() > 256 {
+                        println!("WTF? push {word:?}");
+                    } else {
+                        agg.pos_glosses.push(PosGlosses {
+                            pos: word.pos.clone(),
+                            glosses: all_glosses.clone(),
+                        });
+                    }
                 }
                 if let Some(form_of) = &form_of {
                     if let Some(existing_form_of) = &mut agg.form_of {
@@ -325,7 +308,7 @@ fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
                 word: word.word.clone(),
                 pos_glosses: vec![PosGlosses {
                     pos: word.pos.clone(),
-                    glosses: all_glosses,
+                    glosses: all_glosses[..std::cmp::min(255, all_glosses.len())].to_vec(), // WTF
                 }],
                 hyphenation,
                 form_of,
