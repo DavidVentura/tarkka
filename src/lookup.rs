@@ -25,10 +25,10 @@ fn pretty_print(wn: &str, w: AggregatedWord) {
 
 fn main() {
     let s = Instant::now();
-    let mut d = reader::DictionaryReader::open("it-dictionary.dict").unwrap();
+    let mut d = reader::DictionaryReader::open("en-dictionary.dict").unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
-    let lookup = "abbaiare";
+    let lookup = "dictionary";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {

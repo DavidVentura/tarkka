@@ -1,14 +1,45 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::time::Instant;
 use tarkka::{AggregatedWord, PosGlosses, WordEntry, WordEntryComplete};
 
 fn main() {
-    let lang = "it";
+    let lang = "en";
+    let good_words = match File::open(format!("filtered-{lang}-raw-wiktextract-data.jsonl")) {
+        Ok(mut f) => {
+            println!("parsing json from pre-filtered");
+            let mut s = String::new();
+            f.read_to_string(&mut s).unwrap();
+            serde_json::from_str(s.as_str()).unwrap()
+            // serde_json::from_reader(f).unwrap()
+        }
+        Err(_) => {
+            println!("filtered not found, creating");
+            let f = File::open(format!("{lang}-raw-wiktextract-data.jsonl")).unwrap();
+            let s = Instant::now();
+            let good_words = filter(lang, f);
+            println!("Filter took {:?}", s.elapsed());
+            let s = Instant::now();
+            {
+                let mut f =
+                    File::create(format!("filtered-{lang}-raw-wiktextract-data.jsonl")).unwrap();
+                let ser = serde_json::to_string(&good_words).unwrap();
+                f.write_all(ser.as_bytes()).unwrap();
+            }
+            println!("serialize took {:?}", s.elapsed());
+            good_words
+        }
+    };
+
+    let s = Instant::now();
+    let words = build_index(good_words);
+    println!("Build index took {:?}", s.elapsed());
+
+    let s = Instant::now();
     let file = File::create(format!("{lang}-dictionary.dict")).unwrap();
-    let words = build_index(lang);
     write(file, words);
+    println!("writing took {:?}", s.elapsed());
 }
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
@@ -32,14 +63,10 @@ fn split_at_char_boundary(s: &str, char_index: usize) -> &str {
     }
 }
 
-fn write(mut file: File, aggregated_words: HashMap<String, AggregatedWord>) {
-    let s = Instant::now();
-    let mut sorted_words: Vec<_> = aggregated_words.values().collect();
-    sorted_words.sort_by(|a, b| a.word.cmp(&b.word));
-    println!("sorted {:?}", s.elapsed());
-
+fn write(mut file: File, sorted_words: Vec<AggregatedWord>) {
     let mut words_with_json: Vec<(&AggregatedWord, String)> =
         Vec::with_capacity(sorted_words.len());
+    let s = Instant::now();
     for word in &sorted_words {
         let serialized = serde_json::to_string(word).unwrap();
         words_with_json.push((word, serialized));
@@ -155,10 +182,7 @@ fn write(mut file: File, aggregated_words: HashMap<String, AggregatedWord>) {
 
     let compressed_json_sz = output.len() - level2_size as usize;
 
-    println!(
-        "Created dictionary.dict with {} words",
-        aggregated_words.len()
-    );
+    println!("Created dictionary.dict with {} words", sorted_words.len());
     println!("Header size (static) {}", 4 + 4 + 4 + 4); // DICT + l1 len + l2 size + json size
     println!("Level 1 size: {} bytes", level1_data.len());
     println!("Level 2 size: {} bytes", level2_size);
@@ -168,18 +192,12 @@ fn write(mut file: File, aggregated_words: HashMap<String, AggregatedWord>) {
     );
 }
 
-fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
-    //let content = std::fs::read_to_string("./example-es.jsonl").unwrap();
-    //let content = std::fs::read_to_string("./es-extract.jsonl").unwrap();
-    //let f = File::open("it-raw-wiktextract-data.jsonl").unwrap();
-    let f = File::open(format!("{lang}-raw-wiktextract-data.jsonl")).unwrap();
-    let reader = BufReader::new(f);
+fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComplete> {
+    let reader = BufReader::new(raw_data);
     let lines = reader.lines();
     let unwanted_pos = vec!["proverb"];
-    let wanted_lang = lang;
-    let mut aggregated_words: HashMap<String, AggregatedWord> = HashMap::new();
+    let mut words: Vec<WordEntryComplete> = Vec::with_capacity(1_000_000);
 
-    let s = Instant::now();
     for line in lines {
         let line = line.unwrap();
         if line.len() == 0 {
@@ -225,10 +243,20 @@ fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
         if word.senses.iter().all(|s| s.glosses.is_none()) {
             continue;
         }
+        words.push(word);
+    }
+    words
+}
 
+/// Returns SORTED
+fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
+    let mut aggregated_words: HashMap<&str, AggregatedWord> = HashMap::with_capacity(1_000_000);
+    let s = Instant::now();
+    for i in 0..words.len() {
+        let word = &words[i];
         // there are exactly 0 or 1 hyphenations
         // this was not true
-        let hyphenation = if let Some(h) = word.hyphenations {
+        let hyphenation = if let Some(ref h) = word.hyphenations {
             // FIXME
             // println!("{h:?}");
             // assert!(h.len() <= 1);
@@ -267,7 +295,7 @@ fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
         };
 
         aggregated_words
-            .entry(word.word.clone())
+            .entry(&word.word)
             .and_modify(|agg| {
                 if let Some(existing_pos) = agg.pos_glosses.iter_mut().find(|pg| pg.pos == word.pos)
                 {
@@ -296,7 +324,7 @@ fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
             .or_insert(AggregatedWord {
                 word: word.word.clone(),
                 pos_glosses: vec![PosGlosses {
-                    pos: word.pos,
+                    pos: word.pos.clone(),
                     glosses: all_glosses,
                 }],
                 hyphenation,
@@ -304,15 +332,15 @@ fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
                 ipa_sound,
             });
     }
-
     println!("stage 1 {:?}", s.elapsed());
+    let s = Instant::now();
 
     // some verbs have a `form_of` referencing a word that's not yet on the dictionary
     // remove it. presenting a 404 link to the user is terrible
-    let word_keys: HashSet<String> = aggregated_words.keys().cloned().collect();
+    let word_keys: HashSet<&str> = aggregated_words.keys().copied().collect();
     for aggregated_word in aggregated_words.values_mut() {
         if let Some(form_of) = &mut aggregated_word.form_of {
-            form_of.retain(|word| word_keys.contains(word));
+            form_of.retain(|word| word_keys.contains(word.as_str()));
             if form_of.is_empty() {
                 aggregated_word.form_of = None;
             }
@@ -320,5 +348,9 @@ fn build_index(lang: &str) -> HashMap<String, AggregatedWord> {
     }
     println!("stage 2 {:?}", s.elapsed());
 
-    aggregated_words
+    let s = Instant::now();
+    let mut ret: Vec<AggregatedWord> = aggregated_words.into_values().collect();
+    ret.sort_by(|a, b| a.word.cmp(&b.word));
+    println!("sorted {:?}", s.elapsed());
+    ret
 }
