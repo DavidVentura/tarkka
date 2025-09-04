@@ -7,7 +7,7 @@ use tarkka::{AggregatedWord, HEADER_SIZE, PosGlosses, WordEntry, WordEntryComple
 pub mod reader;
 
 fn main() {
-    let lang = "en";
+    let lang = "zh";
     let good_words = match File::open(format!("filtered-{lang}-raw-wiktextract-data.jsonl")) {
         Ok(mut f) => {
             println!("parsing json from pre-filtered");
@@ -264,17 +264,16 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
         for sense in &word.senses {
             if let Some(glosses) = &sense.glosses {
                 if glosses.len() > 1 {
-                    //assert!(glosses.len() == 2, "w {word:?} glosses {:?}", glosses);
-                    let category = Some(glosses[0].clone());
-                    let remaining_glosses = glosses[1..].to_vec();
+                    let category_path = glosses[0..glosses.len() - 1].to_vec();
+                    let gloss = glosses[glosses.len() - 1].clone();
                     processed_glosses.push(tarkka::Gloss {
-                        category,
-                        glosses: remaining_glosses,
+                        category_path,
+                        gloss,
                     });
-                } else {
+                } else if glosses.len() == 1 {
                     processed_glosses.push(tarkka::Gloss {
-                        category: None,
-                        glosses: glosses.clone(),
+                        category_path: vec![],
+                        gloss: glosses[0].clone(),
                     });
                 }
             }
@@ -282,6 +281,75 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
                 all_form_of.extend(form_of.iter().map(|f| f.word.clone()));
             }
         }
+
+        // Consolidate glosses: if we have an uncategorized gloss that matches a category,
+        // convert the standalone gloss to be grouped under the category
+        let mut consolidated_glosses = Vec::new();
+        let mut used_indices = std::collections::HashSet::new();
+
+        for (i, gloss) in processed_glosses.iter().enumerate() {
+            if used_indices.contains(&i) {
+                continue;
+            }
+
+            if gloss.category_path.is_empty() {
+                // Check if this gloss text appears as a category in other entries
+                let mut found_as_category = false;
+                for (j, other_gloss) in processed_glosses.iter().enumerate() {
+                    if i != j
+                        && !other_gloss.category_path.is_empty()
+                        && other_gloss.category_path[0] == gloss.gloss
+                    {
+                        found_as_category = true;
+                        break;
+                    }
+                }
+
+                if found_as_category {
+                    // This standalone gloss should be converted to a category
+                    // Don't add it as a standalone - it will be handled as a category header
+                    used_indices.insert(i);
+
+                    // Find all glosses that use this as a category and add them
+                    for (j, other_gloss) in processed_glosses.iter().enumerate() {
+                        if i != j
+                            && !other_gloss.category_path.is_empty()
+                            && other_gloss.category_path[0] == gloss.gloss
+                        {
+                            consolidated_glosses.push(other_gloss.clone());
+                            used_indices.insert(j);
+                        }
+                    }
+                } else {
+                    // Keep as uncategorized
+                    consolidated_glosses.push(gloss.clone());
+                    used_indices.insert(i);
+                }
+            } else {
+                // Check if this category already has a standalone version
+                let mut has_standalone = false;
+                for (j, other_gloss) in processed_glosses.iter().enumerate() {
+                    if i != j
+                        && other_gloss.category_path.is_empty()
+                        && other_gloss.gloss == gloss.category_path[0]
+                    {
+                        has_standalone = true;
+                        break;
+                    }
+                }
+
+                if !has_standalone {
+                    // Add this categorized gloss normally
+                    consolidated_glosses.push(gloss.clone());
+                    used_indices.insert(i);
+                }
+                // If it has a standalone version, it will be handled above
+            }
+        }
+
+        // Do not sort consolidated_glosses; they are supposed to come in order
+        // and there's _some amount_ of relevancy to the order in wiktionary
+        processed_glosses = consolidated_glosses;
 
         let ipa_sound = if let Some(sounds) = &word.sounds {
             let ipa_strings: Vec<String> = sounds.iter().filter_map(|s| s.ipa.clone()).collect();
@@ -424,7 +492,7 @@ mod tests {
         for aggregated_word in &result {
             assert!(!aggregated_word.pos_glosses.is_empty());
             assert!(!aggregated_word.pos_glosses[0].glosses.is_empty());
-            assert!(!aggregated_word.pos_glosses[0].glosses[0].glosses.is_empty());
+            assert!(!aggregated_word.pos_glosses[0].glosses[0].gloss.is_empty());
         }
     }
 
@@ -454,7 +522,7 @@ mod tests {
         assert_eq!(word.word, "dictionary");
         assert_eq!(word.pos_glosses[0].pos, "noun");
         assert_eq!(
-            word.pos_glosses[0].glosses[0].glosses[0],
+            word.pos_glosses[0].glosses[0].gloss,
             "a book of word definitions"
         );
 
@@ -463,7 +531,7 @@ mod tests {
         let word = result.unwrap();
         assert_eq!(word.word, "papa");
         assert_eq!(word.pos_glosses[0].pos, "noun");
-        assert_eq!(word.pos_glosses[0].glosses[0].glosses[0], "father");
+        assert_eq!(word.pos_glosses[0].glosses[0].gloss, "father");
 
         let result = dict_reader.lookup("nonexistent").unwrap();
         assert!(result.is_none());
@@ -504,24 +572,186 @@ mod tests {
 
         let first_gloss = &word.pos_glosses[0].glosses[0];
         assert_eq!(
-            first_gloss.category,
-            Some("A mammal of the family Canidae:".to_string())
+            first_gloss.category_path,
+            vec!["A mammal of the family Canidae:"]
         );
-        assert_eq!(first_gloss.glosses.len(), 1);
         assert_eq!(
-            first_gloss.glosses[0],
+            first_gloss.gloss,
             "The species Canis familiaris, domesticated for thousands of years."
         );
 
         let second_gloss = &word.pos_glosses[0].glosses[1];
         assert_eq!(
-            second_gloss.category,
-            Some("A mammal of the family Canidae:".to_string())
+            second_gloss.category_path,
+            vec!["A mammal of the family Canidae:"]
         );
-        assert_eq!(second_gloss.glosses.len(), 1);
         assert_eq!(
-            second_gloss.glosses[0],
+            second_gloss.gloss,
             "Any member of the family Canidae, including domestic dogs, wolves, coyotes."
+        );
+    }
+
+    #[test]
+    fn test_hierarchical_categories() {
+        let place_word = WordEntryComplete {
+            word: "denmark".to_string(),
+            pos: "noun".to_string(),
+            senses: vec![
+                Sense {
+                    glosses: Some(vec![
+                        "A number of places in other countries:".to_string(),
+                        "town in Western Australia".to_string(),
+                    ]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec![
+                        "A number of places in other countries:".to_string(),
+                        "community in Nova Scotia".to_string(),
+                    ]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec![
+                        "A number of places in other countries:".to_string(),
+                        "{{place|en|place|c/USA}}:".to_string(),
+                        "community in Georgia".to_string(),
+                    ]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec![
+                        "A number of places in other countries:".to_string(),
+                        "{{place|en|place|c/USA}}:".to_string(),
+                        "community in Indiana".to_string(),
+                    ]),
+                    form_of: None,
+                },
+            ],
+            hyphenations: None,
+            sounds: None,
+        };
+
+        let test_words = vec![place_word];
+        let result = build_index(test_words);
+
+        assert_eq!(result.len(), 1);
+        let word = &result[0];
+        assert_eq!(word.word, "denmark");
+        assert_eq!(word.pos_glosses[0].glosses.len(), 4);
+
+        // First two have single-level category
+        assert_eq!(
+            word.pos_glosses[0].glosses[0].category_path,
+            vec!["A number of places in other countries:"]
+        );
+        assert_eq!(
+            word.pos_glosses[0].glosses[0].gloss,
+            "town in Western Australia"
+        );
+
+        assert_eq!(
+            word.pos_glosses[0].glosses[1].category_path,
+            vec!["A number of places in other countries:"]
+        );
+        assert_eq!(
+            word.pos_glosses[0].glosses[1].gloss,
+            "community in Nova Scotia"
+        );
+
+        // Last two have nested categories
+        assert_eq!(
+            word.pos_glosses[0].glosses[2].category_path,
+            vec![
+                "A number of places in other countries:",
+                "{{place|en|place|c/USA}}:"
+            ]
+        );
+        assert_eq!(word.pos_glosses[0].glosses[2].gloss, "community in Georgia");
+
+        assert_eq!(
+            word.pos_glosses[0].glosses[3].category_path,
+            vec![
+                "A number of places in other countries:",
+                "{{place|en|place|c/USA}}:"
+            ]
+        );
+        assert_eq!(word.pos_glosses[0].glosses[3].gloss, "community in Indiana");
+    }
+
+    #[test]
+    fn test_category_sorting_and_grouping() {
+        let deer_word = WordEntryComplete {
+            word: "deer".to_string(),
+            pos: "noun".to_string(),
+            senses: vec![
+                Sense {
+                    glosses: Some(vec![
+                        "A ruminant mammal with hooves and often antlers, of the family Cervidae."
+                            .to_string(),
+                    ]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec!["The meat of such an animal; venison.".to_string()]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec![
+                        "A ruminant mammal with hooves and often antlers, of the family Cervidae."
+                            .to_string(),
+                        "One of the smaller animals of the family Cervidae.".to_string(),
+                    ]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec![
+                        "Any animal, especially a quadrupedal mammal.".to_string(),
+                    ]),
+                    form_of: None,
+                },
+            ],
+            hyphenations: None,
+            sounds: None,
+        };
+
+        let test_words = vec![deer_word];
+        let result = build_index(test_words);
+
+        assert_eq!(result.len(), 1);
+        let word = &result[0];
+        assert_eq!(word.word, "deer");
+        // After consolidation, we should have 3 glosses:
+        // - Two uncategorized glosses
+        // - One categorized gloss (the standalone "A ruminant mammal..." was consolidated into the category)
+        assert_eq!(word.pos_glosses[0].glosses.len(), 3);
+
+        // Verify the consolidation worked correctly:
+        assert_eq!(
+            word.pos_glosses[0].glosses[0].category_path,
+            vec!["A ruminant mammal with hooves and often antlers, of the family Cervidae."]
+        );
+        assert_eq!(
+            word.pos_glosses[0].glosses[0].gloss,
+            "One of the smaller animals of the family Cervidae."
+        );
+
+        assert_eq!(
+            word.pos_glosses[0].glosses[1].category_path,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            word.pos_glosses[0].glosses[1].gloss,
+            "The meat of such an animal; venison."
+        );
+
+        assert_eq!(
+            word.pos_glosses[0].glosses[2].category_path,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            word.pos_glosses[0].glosses[2].gloss,
+            "Any animal, especially a quadrupedal mammal."
         );
     }
 }

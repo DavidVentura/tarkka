@@ -15,23 +15,30 @@ fn pretty_print(wn: &str, w: AggregatedWord) {
         _ => "".into(),
     };
     println!("{wn} - {} - {}", ipa, hyphenation);
-    let mut last_category = "".to_string();
+    let mut last_category_path: Vec<String> = vec![];
     for pg in w.pos_glosses {
         println!("{}:", pg.pos);
         for gloss in pg.glosses {
-            if let Some(category) = &gloss.category {
-                if category != &last_category {
-                    println!("  {}", category);
-                    last_category = category.to_string();
-                }
-                for glos in &gloss.glosses {
-                    println!("   - {}", glos);
-                }
-            } else {
-                for glos in &gloss.glosses {
-                    println!(" - {}", glos);
-                }
+            // Find how much of the category path has changed
+            let mut common_len = 0;
+            while common_len < last_category_path.len()
+                && common_len < gloss.category_path.len()
+                && last_category_path[common_len] == gloss.category_path[common_len]
+            {
+                common_len += 1;
             }
+
+            // Print any new category levels
+            for (i, category) in gloss.category_path.iter().enumerate().skip(common_len) {
+                let indent = " ".repeat((i + 1) * 2);
+                println!("{}{}", indent, category);
+            }
+
+            // Print the gloss with appropriate indentation
+            let indent = " ".repeat((gloss.category_path.len() + 1) * 2);
+            println!("{}- {}", indent, gloss.gloss);
+
+            last_category_path = gloss.category_path.clone();
         }
     }
 }
@@ -42,15 +49,7 @@ fn main() {
     let mut d = reader::DictionaryReader::open(f).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
-    let lookup = "deer";
-    let r = d.lookup(lookup).unwrap();
-    println!("looked 1st up {:?}", s.elapsed());
-    if let Some(w) = r {
-        pretty_print(lookup, w);
-    } else {
-        println!("not found: '{lookup}'")
-    };
-    let lookup = "potato";
+    let lookup = "Denmark";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {
