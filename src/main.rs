@@ -258,11 +258,25 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
             None
         };
 
-        let mut all_glosses = Vec::new();
+        let mut processed_glosses = Vec::new();
         let mut all_form_of = Vec::new();
+
         for sense in &word.senses {
             if let Some(glosses) = &sense.glosses {
-                all_glosses.extend(glosses.clone());
+                if glosses.len() > 1 {
+                    //assert!(glosses.len() == 2, "w {word:?} glosses {:?}", glosses);
+                    let category = Some(glosses[0].clone());
+                    let remaining_glosses = glosses[1..].to_vec();
+                    processed_glosses.push(tarkka::Gloss {
+                        category,
+                        glosses: remaining_glosses,
+                    });
+                } else {
+                    processed_glosses.push(tarkka::Gloss {
+                        category: None,
+                        glosses: glosses.clone(),
+                    });
+                }
             }
             if let Some(form_of) = &sense.form_of {
                 all_form_of.extend(form_of.iter().map(|f| f.word.clone()));
@@ -292,18 +306,18 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
             .and_modify(|agg| {
                 if let Some(existing_pos) = agg.pos_glosses.iter_mut().find(|pg| pg.pos == word.pos)
                 {
-                    if (existing_pos.glosses.len() + all_glosses.len()) >= 256 {
+                    if (existing_pos.glosses.len() + processed_glosses.len()) >= 256 {
                         println!("WTF? extend {word:?}");
                     } else {
-                        existing_pos.glosses.extend(all_glosses.clone());
+                        existing_pos.glosses.extend(processed_glosses.clone());
                     }
                 } else {
-                    if all_glosses.len() > 256 {
+                    if processed_glosses.len() > 256 {
                         println!("WTF? push {word:?}");
                     } else {
                         agg.pos_glosses.push(PosGlosses {
                             pos: word.pos.clone(),
-                            glosses: all_glosses.clone(),
+                            glosses: processed_glosses.clone(),
                         });
                     }
                 }
@@ -326,7 +340,8 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
                 word: word.word.clone(),
                 pos_glosses: vec![PosGlosses {
                     pos: word.pos.clone(),
-                    glosses: all_glosses[..std::cmp::min(255, all_glosses.len())].to_vec(), // WTF
+                    glosses: processed_glosses[..std::cmp::min(255, processed_glosses.len())]
+                        .to_vec(),
                 }],
                 hyphenation,
                 form_of,
@@ -409,6 +424,7 @@ mod tests {
         for aggregated_word in &result {
             assert!(!aggregated_word.pos_glosses.is_empty());
             assert!(!aggregated_word.pos_glosses[0].glosses.is_empty());
+            assert!(!aggregated_word.pos_glosses[0].glosses[0].glosses.is_empty());
         }
     }
 
@@ -437,16 +453,75 @@ mod tests {
         let word = result.unwrap();
         assert_eq!(word.word, "dictionary");
         assert_eq!(word.pos_glosses[0].pos, "noun");
-        assert_eq!(word.pos_glosses[0].glosses[0], "a book of word definitions");
+        assert_eq!(
+            word.pos_glosses[0].glosses[0].glosses[0],
+            "a book of word definitions"
+        );
 
         let result = dict_reader.lookup("papa").unwrap();
         assert!(result.is_some());
         let word = result.unwrap();
         assert_eq!(word.word, "papa");
         assert_eq!(word.pos_glosses[0].pos, "noun");
-        assert_eq!(word.pos_glosses[0].glosses[0], "father");
+        assert_eq!(word.pos_glosses[0].glosses[0].glosses[0], "father");
 
         let result = dict_reader.lookup("nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_category_extraction() {
+        let dog_word = WordEntryComplete {
+            word: "dog".to_string(),
+            pos: "noun".to_string(),
+            senses: vec![
+                Sense {
+                    glosses: Some(vec![
+                        "A mammal of the family Canidae:".to_string(),
+                        "The species Canis familiaris, domesticated for thousands of years.".to_string(),
+                    ]),
+                    form_of: None,
+                },
+                Sense {
+                    glosses: Some(vec![
+                        "A mammal of the family Canidae:".to_string(),
+                        "Any member of the family Canidae, including domestic dogs, wolves, coyotes.".to_string(),
+                    ]),
+                    form_of: None,
+                },
+            ],
+            hyphenations: None,
+            sounds: None,
+        };
+
+        let test_words = vec![dog_word];
+        let result = build_index(test_words);
+
+        assert_eq!(result.len(), 1);
+        let word = &result[0];
+        assert_eq!(word.word, "dog");
+        assert_eq!(word.pos_glosses[0].glosses.len(), 2);
+
+        let first_gloss = &word.pos_glosses[0].glosses[0];
+        assert_eq!(
+            first_gloss.category,
+            Some("A mammal of the family Canidae:".to_string())
+        );
+        assert_eq!(first_gloss.glosses.len(), 1);
+        assert_eq!(
+            first_gloss.glosses[0],
+            "The species Canis familiaris, domesticated for thousands of years."
+        );
+
+        let second_gloss = &word.pos_glosses[0].glosses[1];
+        assert_eq!(
+            second_gloss.category,
+            Some("A mammal of the family Canidae:".to_string())
+        );
+        assert_eq!(second_gloss.glosses.len(), 1);
+        assert_eq!(
+            second_gloss.glosses[0],
+            "Any member of the family Canidae, including domestic dogs, wolves, coyotes."
+        );
     }
 }

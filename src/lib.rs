@@ -101,10 +101,16 @@ impl AggregatedWord {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Gloss {
+    pub category: Option<String>,
+    pub glosses: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PosGlosses {
     pub pos: String,
-    pub glosses: Vec<String>,
+    pub glosses: Vec<Gloss>,
 }
 
 impl PosGlosses {
@@ -113,11 +119,35 @@ impl PosGlosses {
         assert!(self.pos.len() < 256);
         v.extend_from_slice(&[self.pos.len() as u8]);
         v.extend_from_slice(self.pos.as_bytes());
+
         assert!(self.glosses.len() < 256, "wtf??? {:?}", self.glosses);
         v.extend_from_slice(&[self.glosses.len() as u8]);
         for gloss in &self.glosses {
-            v.extend_from_slice(&u16_as_2b_leb128(gloss.len() as u16));
-            v.extend_from_slice(gloss.as_bytes());
+            v.extend_from_slice(&gloss.serialize());
+        }
+        v
+    }
+}
+
+impl Gloss {
+    fn serialize(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+
+        let category_len = self.category.as_ref().map(|c| c.len()).unwrap_or(0);
+        v.extend_from_slice(&u16_as_2b_leb128(category_len as u16));
+        if let Some(category) = &self.category {
+            v.extend_from_slice(category.as_bytes());
+        }
+
+        assert!(
+            self.glosses.len() < 256,
+            "too many glosses: {:?}",
+            self.glosses
+        );
+        v.extend_from_slice(&[self.glosses.len() as u8]);
+        for gloss_text in &self.glosses {
+            v.extend_from_slice(&u16_as_2b_leb128(gloss_text.len() as u16));
+            v.extend_from_slice(gloss_text.as_bytes());
         }
         v
     }
@@ -187,13 +217,42 @@ impl AggregatedWord {
 
             let mut glosses = Vec::with_capacity(glosses_count);
             for _ in 0..glosses_count {
-                let gloss_len = read_2b_leb128(data, &mut pos)? as usize;
-                if pos + gloss_len > data.len() {
-                    return Err("Not enough data for gloss string");
+                let category_len = read_2b_leb128(data, &mut pos)? as usize;
+
+                let category = if category_len == 0 {
+                    None
+                } else {
+                    if pos + category_len > data.len() {
+                        return Err("Not enough data for category string");
+                    }
+                    let cat_string =
+                        String::from_utf8_lossy(&data[pos..pos + category_len]).to_string();
+                    pos += category_len;
+                    Some(cat_string)
+                };
+
+                if pos >= data.len() {
+                    return Err("Not enough data for gloss texts count");
                 }
-                let gloss = String::from_utf8_lossy(&data[pos..pos + gloss_len]).to_string();
-                pos += gloss_len;
-                glosses.push(gloss);
+                let gloss_texts_count = data[pos] as usize;
+                pos += 1;
+
+                let mut gloss_texts = Vec::with_capacity(gloss_texts_count);
+                for _ in 0..gloss_texts_count {
+                    let gloss_len = read_2b_leb128(data, &mut pos)? as usize;
+                    if pos + gloss_len > data.len() {
+                        return Err("Not enough data for gloss text");
+                    }
+                    let gloss_text =
+                        String::from_utf8_lossy(&data[pos..pos + gloss_len]).to_string();
+                    pos += gloss_len;
+                    gloss_texts.push(gloss_text);
+                }
+
+                glosses.push(Gloss {
+                    category,
+                    glosses: gloss_texts,
+                });
             }
 
             pos_glosses.push(PosGlosses {

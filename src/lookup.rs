@@ -15,10 +15,23 @@ fn pretty_print(wn: &str, w: AggregatedWord) {
         _ => "".into(),
     };
     println!("{wn} - {} - {}", ipa, hyphenation);
+    let mut last_category = "".to_string();
     for pg in w.pos_glosses {
         println!("{}:", pg.pos);
-        for glos in pg.glosses {
-            println!(" - {}", glos);
+        for gloss in pg.glosses {
+            if let Some(category) = &gloss.category {
+                if category != &last_category {
+                    println!("  {}", category);
+                    last_category = category.to_string();
+                }
+                for glos in &gloss.glosses {
+                    println!("   - {}", glos);
+                }
+            } else {
+                for glos in &gloss.glosses {
+                    println!(" - {}", glos);
+                }
+            }
         }
     }
 }
@@ -29,6 +42,14 @@ fn main() {
     let mut d = reader::DictionaryReader::open(f).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
+    let lookup = "deer";
+    let r = d.lookup(lookup).unwrap();
+    println!("looked 1st up {:?}", s.elapsed());
+    if let Some(w) = r {
+        pretty_print(lookup, w);
+    } else {
+        println!("not found: '{lookup}'")
+    };
     let lookup = "potato";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
