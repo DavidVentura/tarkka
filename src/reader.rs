@@ -1,77 +1,81 @@
+use std::io::Seek;
 use std::io::{Read, SeekFrom};
-use std::{fs::File, io::Seek};
 use tarkka::{AggregatedWord, HEADER_SIZE};
 
-struct OffsetFile {
-    file: File,
+struct OffsetFile<R: Read + Seek> {
+    reader: R,
     base_offset: u64,
 }
 
-impl OffsetFile {
-    fn new(mut file: File, base_offset: u64) -> std::io::Result<Self> {
-        file.seek(SeekFrom::Start(base_offset))?;
-        Ok(Self { file, base_offset })
+impl<R: Read + Seek> OffsetFile<R> {
+    fn new(mut r: R, base_offset: u64) -> std::io::Result<Self> {
+        r.seek(SeekFrom::Start(base_offset))?;
+        Ok(Self {
+            reader: r,
+            base_offset,
+        })
     }
 }
 
-impl Read for OffsetFile {
+impl<R: Read + Seek> Read for OffsetFile<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
+        self.reader.read(buf)
     }
 }
 
-impl Seek for OffsetFile {
+impl<R: Read + Seek> Seek for OffsetFile<R> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let adjusted_pos = match pos {
             SeekFrom::Start(offset) => SeekFrom::Start(self.base_offset + offset),
             SeekFrom::Current(offset) => SeekFrom::Current(offset),
             SeekFrom::End(offset) => SeekFrom::End(offset),
         };
-        let result = self.file.seek(adjusted_pos)?;
+        let result = self.reader.seek(adjusted_pos)?;
         Ok(result - self.base_offset)
     }
 }
 
-pub struct DictionaryReader<'a> {
+pub struct DictionaryReader<'a, R: Read + Seek> {
     level1_data: Vec<u8>,
     level2_size: u32,
-    json_off: u32,
-    decoder: zeekstd::Decoder<'a, OffsetFile>,
+    binary_data_off: u32,
+    decoder: zeekstd::Decoder<'a, OffsetFile<R>>,
 }
 
-impl<'a> DictionaryReader<'a> {
-    pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut file = File::open(path)?;
+impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
+    //pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn open(mut r: R) -> Result<Self, Box<dyn std::error::Error>> {
+        //let mut file = File::open(path)?;
 
         let mut magic = [0u8; 4];
-        file.read_exact(&mut magic)?;
+        r.read_exact(&mut magic)?;
         if &magic != b"DICT" {
             return Err("Invalid dictionary file format".into());
         }
 
         let mut size_buf = [0u8; 4];
 
-        file.read_exact(&mut size_buf)?;
+        r.read_exact(&mut size_buf)?;
         let level1_size = u32::from_le_bytes(size_buf);
 
-        file.read_exact(&mut size_buf)?;
+        r.read_exact(&mut size_buf)?;
         let level2_size = u32::from_le_bytes(size_buf);
 
-        file.read_exact(&mut size_buf)?;
-        let _json_size = u32::from_le_bytes(size_buf);
+        r.read_exact(&mut size_buf)?;
+        let _binary_data_size = u32::from_le_bytes(size_buf);
 
         let mut level1_data = vec![0u8; level1_size as usize];
-        file.read_exact(&mut level1_data)?;
+        r.read_exact(&mut level1_data)?;
 
         let level2_off = level1_size + HEADER_SIZE as u32;
-        let offset_file = OffsetFile::new(file, level2_off as u64)?;
+        let offset_file = OffsetFile::new(r, level2_off as u64)?;
         let decoder = zeekstd::Decoder::new(offset_file).unwrap();
 
-        let json_off = level2_size;
+        let binary_data_off = level2_size;
         Ok(DictionaryReader {
             level1_data,
             level2_size,
-            json_off,
+            binary_data_off,
             decoder,
         })
     }
@@ -80,75 +84,65 @@ impl<'a> DictionaryReader<'a> {
         &mut self,
         word: &str,
     ) -> Result<Option<AggregatedWord>, Box<dyn std::error::Error>> {
-        let first_char = word.chars().next().ok_or("Empty word")?;
-        let first_char_bytes = first_char.to_string();
-
-        let (level2_offset, group_size) = match self.find_level2_offset(&first_char_bytes)? {
-            Some(result) => result,
-            None => return Ok(None),
+        let word_bytes = word.as_bytes();
+        let l1_group = match word_bytes.len() {
+            0 => return Err("Empty word".into()),
+            1 => [0, 0, word_bytes[0]],
+            2 => [0, word_bytes[0], word_bytes[1]],
+            _ => [word_bytes[0], word_bytes[1], word_bytes[2]],
         };
 
-        let result = self.find_in_level2_group(level2_offset, group_size, word)?;
+        let (group_offset, group_size, binary_base_offset) =
+            match self.find_level2_group_info(&l1_group)? {
+                Some((offset, size, binary_offset)) => (offset, size, binary_offset),
+                None => return Ok(None),
+            };
+
+        let result = self.find_in_level2_group(group_offset, group_size, word)?;
         if result.is_none() {
             return Ok(None);
         }
 
-        let (json_offset, json_size) = result.unwrap();
-        match self.get_word_from_json(json_offset + self.json_off, json_size) {
+        let (relative_binary_offset, binary_size) = result.unwrap();
+        let absolute_binary_offset =
+            binary_base_offset + relative_binary_offset + self.binary_data_off;
+        match self.get_word_from_binary_data(absolute_binary_offset, binary_size, word) {
             Ok(w) => Ok(Some(w)),
             Err(e) => Err(e),
         }
     }
 
-    fn find_level2_offset(
+    fn find_level2_group_info(
         &self,
-        first_char: &str,
-    ) -> Result<Option<(u32, u32)>, Box<dyn std::error::Error>> {
-        let target_bytes = first_char.as_bytes();
+        l1_group: &[u8; 3],
+    ) -> Result<Option<(u32, u32, u32)>, Box<dyn std::error::Error>> {
         let mut pos = 0;
+        let mut group_offset = 0u32;
 
-        while pos < self.level1_data.len() {
-            let char_start = pos;
-            let first_byte = self.level1_data[pos];
-            let char_len = if first_byte < 0x80 {
-                1
-            } else if first_byte < 0xE0 {
-                2
-            } else if first_byte < 0xF0 {
-                3
-            } else {
-                4
-            };
+        while pos + 11 <= self.level1_data.len() {
+            let key = [
+                self.level1_data[pos],
+                self.level1_data[pos + 1],
+                self.level1_data[pos + 2],
+            ];
 
-            if pos + char_len + 8 > self.level1_data.len() {
-                break;
+            let size_bytes = &self.level1_data[pos + 3..pos + 7];
+            let size =
+                u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]);
+
+            if &key == l1_group {
+                let binary_offset_bytes = &self.level1_data[pos + 7..pos + 11];
+                let binary_offset = u32::from_le_bytes([
+                    binary_offset_bytes[0],
+                    binary_offset_bytes[1],
+                    binary_offset_bytes[2],
+                    binary_offset_bytes[3],
+                ]);
+                return Ok(Some((group_offset, size, binary_offset)));
             }
 
-            let char_bytes = &self.level1_data[char_start..char_start + char_len];
-
-            if char_bytes == target_bytes {
-                let offset_bytes =
-                    &self.level1_data[char_start + char_len..char_start + char_len + 4];
-                let offset = u32::from_le_bytes([
-                    offset_bytes[0],
-                    offset_bytes[1],
-                    offset_bytes[2],
-                    offset_bytes[3],
-                ]);
-
-                let size_bytes =
-                    &self.level1_data[char_start + char_len + 4..char_start + char_len + 8];
-                let size = u32::from_le_bytes([
-                    size_bytes[0],
-                    size_bytes[1],
-                    size_bytes[2],
-                    size_bytes[3],
-                ]);
-
-                return Ok(Some((offset, size)));
-            }
-
-            pos = char_start + char_len + 8;
+            group_offset += size;
+            pos += 11; // 3 bytes key + 4 bytes size + 4 bytes binary offset
         }
 
         Ok(None)
@@ -172,80 +166,63 @@ impl<'a> DictionaryReader<'a> {
         let mut decompressed = Vec::new();
         std::io::copy(&mut self.decoder, &mut decompressed)?;
 
+        let wanted_word_b = word.as_bytes();
         let mut pos = 0;
-        let mut current_word = String::new();
+        let mut current_word: Vec<u8> = Vec::new();
+        let mut binary_offset = 0u32;
 
-        while pos < decompressed.len() {
-            if pos + 2 > decompressed.len() {
-                break;
-            }
-
-            // Read restart_flag(1bit) + shared_prefix_len(7bits)
-            let prefix_byte = decompressed[pos];
-            let is_restart = (prefix_byte & 0x80) != 0;
-            let shared_len = (prefix_byte & 0x7F) as usize;
+        while pos + 4 <= decompressed.len() {
+            let shared_len = decompressed[pos] as usize;
             pos += 1;
 
             let suffix_len = decompressed[pos] as usize;
             pos += 1;
 
-            if pos + suffix_len + 6 > decompressed.len() {
-                break;
+            if pos + suffix_len + 2 > decompressed.len() {
+                panic!("malformed data, expected suffix but got EOF");
             }
 
-            let suffix =
-                unsafe { std::str::from_utf8_unchecked(&decompressed[pos..pos + suffix_len]) };
+            assert!(suffix_len > 0);
+            let suffix_b = &decompressed[pos..pos + suffix_len];
             pos += suffix_len;
 
-            if is_restart && shared_len == 0 {
-                // For restart entries, reconstruct from the last restart word + current shared_len + suffix
-                current_word = suffix.to_string();
-            } else {
-                // For non-restart entries, use shared_len from current restart word
-                let truncate_pos = current_word
-                    .char_indices()
-                    .nth(shared_len)
-                    .map(|(pos, _)| pos)
-                    .unwrap_or(current_word.len());
-                current_word.truncate(truncate_pos);
-                current_word.push_str(suffix);
+            // TODO remove alloc with mem:swap
+            let mut word_buf = Vec::new();
+            if shared_len > 0 {
+                assert!(current_word.len() > 0);
+                word_buf.extend_from_slice(&current_word[0..shared_len]);
             }
+            word_buf.extend_from_slice(suffix_b);
 
-            // Read JSON offset and size
-            let offset_bytes = &decompressed[pos..pos + 4];
-            let json_offset = u32::from_le_bytes([
-                offset_bytes[0],
-                offset_bytes[1],
-                offset_bytes[2],
-                offset_bytes[3],
-            ]);
-            pos += 4;
-
+            // Read binary data size (2 bytes)
             let size_bytes = &decompressed[pos..pos + 2];
-            let json_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]);
+            let binary_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]);
             pos += 2;
 
-            if current_word == word {
-                return Ok(Some((json_offset, json_size)));
+            if word_buf == wanted_word_b {
+                return Ok(Some((binary_offset, binary_size)));
             }
+            current_word = word_buf;
+
+            binary_offset += binary_size as u32;
         }
 
         Ok(None)
     }
 
-    fn get_word_from_json(
+    fn get_word_from_binary_data(
         &mut self,
         offset: u32,
         size: u16,
+        word: &str,
     ) -> Result<AggregatedWord, Box<dyn std::error::Error>> {
         let mut decompressed = Vec::new();
         self.decoder.set_offset(offset as u64)?;
         self.decoder.set_offset_limit(offset as u64 + size as u64)?;
         std::io::copy(&mut self.decoder, &mut decompressed)?;
 
-        let json_entry = unsafe { String::from_utf8_unchecked(decompressed) };
-        let parsed: AggregatedWord =
-            serde_json::from_str(&json_entry).expect("failed to JSON decode");
+        let parsed = AggregatedWord::deserialize(&decompressed, word.to_string())
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::from(e) })?;
 
         Ok(parsed)
     }

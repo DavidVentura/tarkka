@@ -134,3 +134,166 @@ pub fn u16_as_2b_leb128(value: u16) -> Vec<u8> {
         panic!("Tried to fit too large val into 2b");
     }
 }
+
+pub fn read_2b_leb128(data: &[u8], pos: &mut usize) -> Result<u16, &'static str> {
+    if *pos >= data.len() {
+        return Err("Not enough data");
+    }
+
+    let first_byte = data[*pos];
+    *pos += 1;
+
+    if first_byte < 0x80 {
+        Ok(first_byte as u16)
+    } else {
+        if *pos >= data.len() {
+            return Err("Not enough data for second byte");
+        }
+        let second_byte = data[*pos];
+        *pos += 1;
+        Ok(((first_byte & 0x7F) as u16) | ((second_byte as u16) << 7))
+    }
+}
+
+impl AggregatedWord {
+    pub fn deserialize(data: &[u8], word: String) -> Result<Self, &'static str> {
+        let mut pos = 0;
+
+        if pos >= data.len() {
+            return Err("Not enough data for pos_glosses count");
+        }
+        let pos_glosses_count = data[pos] as usize;
+        pos += 1;
+
+        let mut pos_glosses = Vec::with_capacity(pos_glosses_count);
+        for _ in 0..pos_glosses_count {
+            if pos >= data.len() {
+                return Err("Not enough data for pos length");
+            }
+            let pos_len = data[pos] as usize;
+            pos += 1;
+
+            if pos + pos_len > data.len() {
+                return Err("Not enough data for pos string");
+            }
+            let pos_string = String::from_utf8_lossy(&data[pos..pos + pos_len]).to_string();
+            pos += pos_len;
+
+            if pos >= data.len() {
+                return Err("Not enough data for glosses count");
+            }
+            let glosses_count = data[pos] as usize;
+            pos += 1;
+
+            let mut glosses = Vec::with_capacity(glosses_count);
+            for _ in 0..glosses_count {
+                let gloss_len = read_2b_leb128(data, &mut pos)? as usize;
+                if pos + gloss_len > data.len() {
+                    return Err("Not enough data for gloss string");
+                }
+                let gloss = String::from_utf8_lossy(&data[pos..pos + gloss_len]).to_string();
+                pos += gloss_len;
+                glosses.push(gloss);
+            }
+
+            pos_glosses.push(PosGlosses {
+                pos: pos_string,
+                glosses,
+            });
+        }
+
+        // Read hyphenation
+        if pos >= data.len() {
+            return Err("Not enough data for hyphenation count");
+        }
+        let hyphen_count = data[pos] as usize;
+        pos += 1;
+
+        let hyphenation = if hyphen_count == 0 {
+            None
+        } else {
+            let mut parts = Vec::with_capacity(hyphen_count);
+            for _ in 0..hyphen_count {
+                if pos >= data.len() {
+                    return Err("Not enough data for hyphenation part length");
+                }
+                let part_len = data[pos] as usize;
+                pos += 1;
+
+                if part_len > 0 {
+                    if pos + part_len > data.len() {
+                        return Err("Not enough data for hyphenation part");
+                    }
+                    let part = String::from_utf8_lossy(&data[pos..pos + part_len]).to_string();
+                    pos += part_len;
+                    parts.push(part);
+                }
+            }
+            if parts.is_empty() { None } else { Some(parts) }
+        };
+
+        // Read form_of
+        if pos >= data.len() {
+            return Err("Not enough data for form_of count");
+        }
+        let form_of_count = data[pos] as usize;
+        pos += 1;
+
+        let form_of = if form_of_count == 0 {
+            None
+        } else {
+            let mut words = Vec::with_capacity(form_of_count);
+            for _ in 0..form_of_count {
+                if pos >= data.len() {
+                    return Err("Not enough data for form_of word length");
+                }
+                let word_len = data[pos] as usize;
+                pos += 1;
+
+                if pos + word_len > data.len() {
+                    return Err("Not enough data for form_of word");
+                }
+                let word = String::from_utf8_lossy(&data[pos..pos + word_len]).to_string();
+                pos += word_len;
+                words.push(word);
+            }
+            Some(words)
+        };
+
+        // Read IPA sounds
+        if pos >= data.len() {
+            return Err("Not enough data for ipa count");
+        }
+        let ipa_count = data[pos] as usize;
+        pos += 1;
+
+        let ipa_sound = if ipa_count == 0 {
+            None
+        } else {
+            let mut sounds = Vec::with_capacity(ipa_count);
+            for _ in 0..ipa_count {
+                if pos >= data.len() {
+                    return Err("Not enough data for ipa length");
+                }
+                let sound_len = data[pos] as usize;
+                pos += 1;
+
+                if pos + sound_len > data.len() {
+                    return Err("Not enough data for ipa sound");
+                }
+                let sound = String::from_utf8_lossy(&data[pos..pos + sound_len]).to_string();
+                pos += sound_len;
+                sounds.push(sound);
+            }
+            Some(sounds)
+        };
+
+        Ok(AggregatedWord {
+            word,
+            pos_glosses,
+            hyphenation,
+            form_of,
+            ipa_sound,
+        })
+    }
+}

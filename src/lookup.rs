@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{fs::File, time::Instant};
 
 use tarkka::AggregatedWord;
 
@@ -25,10 +25,11 @@ fn pretty_print(wn: &str, w: AggregatedWord) {
 
 fn main() {
     let s = Instant::now();
-    let mut d = reader::DictionaryReader::open("en-dictionary.dict").unwrap();
+    let f = File::open("en-dictionary.dict").unwrap();
+    let mut d = reader::DictionaryReader::open(f).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
-    let lookup = "dictionary";
+    let lookup = "potato";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {
