@@ -2,28 +2,67 @@ use std::{fs::File, time::Instant};
 
 use tarkka::{WordTag, WordWithTaggedEntries, reader::DictionaryReader};
 
+fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_prefix: &str) {
+    let mut last_category_path: Vec<String> = Vec::new();
+
+    println!("{}{}: ", tag_prefix, pos);
+
+    for gloss in glosses {
+        // Reconstruct full category path from compressed format
+        let mut current_category_path = Vec::new();
+
+        // Add shared prefix from previous gloss
+        if gloss.shared_prefix_count > 0 {
+            let prefix_len = (gloss.shared_prefix_count as usize).min(last_category_path.len());
+            current_category_path.extend_from_slice(&last_category_path[..prefix_len]);
+        }
+
+        // Add new categories
+        if !gloss.new_categories.is_empty() {
+            current_category_path.extend(gloss.new_categories.clone());
+        }
+
+        // Find how much of the category path has changed
+        let mut common_len = 0;
+        while common_len < last_category_path.len()
+            && common_len < current_category_path.len()
+            && last_category_path[common_len] == current_category_path[common_len]
+        {
+            common_len += 1;
+        }
+
+        // Print any new category levels
+        for (i, category) in current_category_path.iter().enumerate().skip(common_len) {
+            let indent = "  ".repeat(i + 1);
+            println!("{}{}", indent, category);
+        }
+
+        // Print the gloss with appropriate indentation
+        let indent = "  ".repeat(current_category_path.len() + 1);
+        println!("{}• {}", indent, gloss.gloss);
+
+        last_category_path = current_category_path;
+    }
+}
+
 fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
     // Collect all IPA pronunciations and hyphenations from all entries
     let mut all_ipa = Vec::new();
     let mut all_hyphenations = Vec::new();
 
     for entry in &w.entries {
-        if let Some(sounds) = &entry.sounds {
-            for sound in sounds {
-                if let Some(ipa) = &sound.ipa {
-                    if !all_ipa.contains(ipa) {
-                        all_ipa.push(ipa.clone());
-                    }
+        for sound in &entry.sounds {
+            if let Some(ipa) = &sound.ipa {
+                if !all_ipa.contains(ipa) {
+                    all_ipa.push(ipa.clone());
                 }
             }
         }
 
-        if let Some(hyphenations) = &entry.hyphenations {
-            for hyphenation in hyphenations {
-                let hyph_str = hyphenation.parts.join("-");
-                if !all_hyphenations.contains(&hyph_str) {
-                    all_hyphenations.push(hyph_str);
-                }
+        for hyphenation in &entry.hyphenations {
+            let hyph_str = hyphenation.parts.join("-");
+            if !all_hyphenations.contains(&hyph_str) {
+                all_hyphenations.push(hyph_str);
             }
         }
     }
@@ -43,17 +82,13 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
     println!("{wn} - {} - {}", ipa_str, hyph_str);
 
     // Display entries based on tag
+    println!("{w:#?}");
     match w.tag {
         WordTag::Monolingual => {
             // All entries are monolingual
             for entry in &w.entries {
                 for sense in &entry.senses {
-                    println!("[MONO] {}:", sense.pos);
-                    if let Some(glosses) = &sense.glosses {
-                        for gloss in glosses {
-                            println!("  - {}", gloss);
-                        }
-                    }
+                    display_glosses_with_categories(&sense.glosses, &sense.pos, "[MONO] ");
                 }
             }
         }
@@ -61,12 +96,7 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
             // All entries are English
             for entry in &w.entries {
                 for sense in &entry.senses {
-                    println!("[ENG] {}:", sense.pos);
-                    if let Some(glosses) = &sense.glosses {
-                        for gloss in glosses {
-                            println!("  - {}", gloss);
-                        }
-                    }
+                    display_glosses_with_categories(&sense.glosses, &sense.pos, "[ENG] ");
                 }
             }
         }
@@ -76,22 +106,12 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
 
             // First entry is monolingual
             for sense in &w.entries[0].senses {
-                println!("[MONO] {}:", sense.pos);
-                if let Some(glosses) = &sense.glosses {
-                    for gloss in glosses {
-                        println!("  - {}", gloss);
-                    }
-                }
+                display_glosses_with_categories(&sense.glosses, &sense.pos, "[MONO] ");
             }
 
             // Second entry is English
             for sense in &w.entries[1].senses {
-                println!("[ENG] {}:", sense.pos);
-                if let Some(glosses) = &sense.glosses {
-                    for gloss in glosses {
-                        println!("  - {}", gloss);
-                    }
-                }
+                display_glosses_with_categories(&sense.glosses, &sense.pos, "[ENG] ");
             }
         }
     }
@@ -101,9 +121,11 @@ fn main() {
     let s = Instant::now();
     //let f = File::open("en-dictionary.dict").unwrap();
     let f = File::open("es-multi-dictionary.dict").unwrap();
+    //let f = File::open("en-multi-dictionary.dict").unwrap();
     let mut d = DictionaryReader::open(f).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
+    let lookup = "Denmark";
     let lookup = "perro";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());

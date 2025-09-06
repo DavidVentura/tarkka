@@ -11,15 +11,22 @@ pub const HEADER_SIZE: u8 = 16;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WordEntryComplete {
     pub senses: Vec<Sense>,
-    pub hyphenations: Option<Vec<Hyphenation>>,
-    pub sounds: Option<Vec<Sound>>,
+    pub hyphenations: Vec<Hyphenation>,
+    pub sounds: Vec<Sound>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Gloss {
+    pub shared_prefix_count: u8,
+    pub new_categories: Vec<String>,
+    pub gloss: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Sense {
     pub pos: String,
-    pub form_of: Option<Vec<FormOf>>,
-    pub glosses: Option<Vec<String>>,
+    pub form_of: Vec<FormOf>,
+    pub glosses: Vec<Gloss>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -27,12 +34,12 @@ pub struct FormOf {
     pub word: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Sound {
     pub ipa: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Hyphenation {
     pub parts: Vec<String>,
 }
@@ -65,6 +72,7 @@ impl WordWithTaggedEntries {
             self.word
         );
         v.push(self.entries.len() as u8);
+        assert!(self.entries.len() <= 2);
 
         // Serialize each entry
         for entry in &self.entries {

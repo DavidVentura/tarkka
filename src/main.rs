@@ -7,7 +7,7 @@ use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
 
 pub mod reader;
 
-fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(WordEntryComplete, bool)> {
+fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(String, WordEntryComplete, bool)> {
     let good_words = match File::open(format!(
         "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
     )) {
@@ -15,13 +15,17 @@ fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(WordEntryComplete, bool
             println!("parsing json from pre-filtered");
             let mut s = String::new();
             f.read_to_string(&mut s).unwrap();
-            let kaikki_words: Vec<KaikkiWordEntry> = serde_json::from_str(s.as_str()).unwrap();
-            let words: Vec<WordEntryComplete> = kaikki_words
+            let kaikki_words: Vec<(String, KaikkiWordEntry)> =
+                serde_json::from_str(s.as_str()).unwrap();
+            let words: Vec<(String, WordEntryComplete)> = kaikki_words
                 .into_iter()
-                .map(|kw| kw.to_word_entry_complete())
+                .map(|(s, kw)| (s.clone(), kw.to_word_entry_complete()))
                 .collect();
             let is_monolingual = word_lang == gloss_lang;
-            words.into_iter().map(|w| (w, is_monolingual)).collect()
+            words
+                .into_iter()
+                .map(|(word, w)| (word, w, is_monolingual))
+                .collect()
             // serde_json::from_reader(f).unwrap()
             // much slower??
         }
@@ -44,7 +48,7 @@ fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(WordEntryComplete, bool
             let is_monolingual = word_lang == gloss_lang;
             good_words
                 .into_iter()
-                .map(|w| (w, is_monolingual))
+                .map(|(word, w)| (word, w.to_word_entry_complete(), is_monolingual))
                 .collect()
         }
     };
@@ -56,9 +60,13 @@ fn main() {
     let good_words1 = lang_words(word_lang, "es");
     let mut good_words2 = lang_words(word_lang, "en");
     println!("entries ES {} EN {}", good_words1.len(), good_words2.len());
-
     let mut all_tagged_entries = good_words1;
     all_tagged_entries.append(&mut good_words2);
+
+    /*
+    let word_lang = "en";
+    let all_tagged_entries = lang_words(word_lang, "en");
+    */
 
     let s = Instant::now();
     let words = build_tagged_index(all_tagged_entries);
@@ -103,8 +111,6 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
     let mut shared_prefixes = 0;
     let mut global_binary_offset = 0u32;
 
-    let mut l2_dbg = Vec::new();
-
     for (l1_group, words) in groups {
         let mut l2_raw_size = 0u32;
         let mut prev_word = "";
@@ -137,22 +143,7 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             let fixed_ovh = 1 + 1 + ser_size_b.len();
             debug_assert!(fixed_ovh <= 4);
             let entry_size = suffix.len() + fixed_ovh;
-            if word.word == "dictionary" {
-                println!("L1 says data for 'dic' starts at {group_binary_start}");
-                println!("L2 says size is {}", ser_size);
-                println!("L2 calculated data offset {}", global_binary_offset);
-                println!(
-                    "Actual serialized data so far ('dictionary' data starts at) {}",
-                    all_serialized.len()
-                );
-            }
             all_serialized.extend_from_slice(&serialized);
-            if l1_group == ['d' as u8, 'i' as u8, 'c' as u8] {
-                l2_dbg.push(shared_len as u8);
-                l2_dbg.push(suffix.len() as u8);
-                l2_dbg.extend_from_slice(suffix);
-                l2_dbg.extend_from_slice(&ser_size_b);
-            }
             global_binary_offset += ser_size as u32;
             l2_raw_size += entry_size as u32;
 
@@ -203,11 +194,11 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
     );
 }
 
-fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComplete> {
+fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<(String, KaikkiWordEntry)> {
     let reader = BufReader::new(raw_data);
     let lines = reader.lines();
     let unwanted_pos = vec!["proverb"];
-    let mut words: Vec<WordEntryComplete> = Vec::with_capacity(1_000_000);
+    let mut words: Vec<(String, KaikkiWordEntry)> = Vec::with_capacity(1_000_000);
 
     for line in lines {
         let line = line.unwrap();
@@ -242,33 +233,39 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComple
 
         // ^^ parseable
         // vv parse as complete entry
-        let kaikki_word: KaikkiWordEntry = serde_json::from_str(&line).unwrap();
-        let word = kaikki_word.to_word_entry_complete();
+        let mut kaikki_word: KaikkiWordEntry = serde_json::from_str(&line).unwrap();
 
         // Check POS at the sense level
-        let has_unwanted_pos = word
-            .senses
-            .iter()
-            .any(|sense| unwanted_pos.contains(&sense.pos.as_str()));
-        if has_unwanted_pos {
-            continue;
+        if let Some(ref pos) = kaikki_word.pos {
+            if unwanted_pos.contains(&pos.as_str()) {
+                continue;
+            }
         }
+
         // no definitions, not the most useful dictionary
-        if word.senses.iter().all(|s| s.glosses.is_none()) {
+        if kaikki_word.senses.is_empty() {
             continue;
         }
-        words.push(word);
+
+        kaikki_word.sounds.retain_mut(|s| s.ipa.is_some());
+
+        let word_str = kaikki_word.word.clone();
+        words.push((word_str, kaikki_word));
     }
     words
 }
 
+// TODO: this should not take shitty entries with the Kaikki limitatios
 fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
     if entries.is_empty() {
         panic!("Cannot aggregate empty entries");
     }
 
     if entries.len() == 1 {
-        return entries.into_iter().next().unwrap();
+        let mut entry = entries.into_iter().next().unwrap();
+        // Still need to compress categories even for single entry
+        compress_categories(&mut entry.senses);
+        return entry;
     }
 
     // Take the first entry as base and aggregate others into it
@@ -281,47 +278,77 @@ fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
         }
 
         // Merge sounds (deduplicate)
-        if let Some(entry_sounds) = entry.sounds {
-            if let Some(base_sounds) = &mut base.sounds {
-                for sound in entry_sounds {
-                    if !base_sounds.iter().any(|s| s.ipa == sound.ipa) {
-                        base_sounds.push(sound);
-                    }
-                }
-            } else {
-                base.sounds = Some(entry_sounds);
+        for sound in entry.sounds {
+            if sound.ipa.is_none() {
+                continue;
             }
+            if base.sounds.contains(&sound) {
+                continue;
+            }
+            base.sounds.push(sound);
         }
 
         // Merge hyphenations (deduplicate)
-        if let Some(entry_hyphenations) = entry.hyphenations {
-            if let Some(base_hyphenations) = &mut base.hyphenations {
-                for hyphenation in entry_hyphenations {
-                    if !base_hyphenations
-                        .iter()
-                        .any(|h| h.parts == hyphenation.parts)
-                    {
-                        base_hyphenations.push(hyphenation);
-                    }
-                }
-            } else {
-                base.hyphenations = Some(entry_hyphenations);
+        for hy in entry.hyphenations {
+            if base.hyphenations.contains(&hy) {
+                continue;
             }
+            base.hyphenations.push(hy);
         }
     }
+
+    // Compress categories after aggregation
+    compress_categories(&mut base.senses);
 
     base
 }
 
+fn compress_categories(senses: &mut Vec<tarkka::Sense>) {
+    let mut last_category_path: Vec<String> = Vec::new();
+
+    for sense in senses {
+        for gloss in sense.glosses.iter_mut() {
+            if !gloss.new_categories.is_empty() {
+                // Current full category path is the new categories for this gloss
+                let current_category_path = gloss.new_categories.clone();
+
+                // Find common prefix with previous category path
+                let mut shared_count = 0;
+                while shared_count < last_category_path.len()
+                    && shared_count < current_category_path.len()
+                    && last_category_path[shared_count] == current_category_path[shared_count]
+                {
+                    shared_count += 1;
+                }
+
+                // Update the gloss with compression info
+                gloss.shared_prefix_count = shared_count as u8;
+                gloss.new_categories = if shared_count < current_category_path.len() {
+                    current_category_path[shared_count..].to_vec()
+                } else {
+                    vec![]
+                };
+
+                // Update last category path for next iteration
+                last_category_path = current_category_path;
+            } else {
+                // No categories, reset the path
+                gloss.shared_prefix_count = 0;
+                last_category_path.clear();
+            }
+        }
+    }
+}
+
 pub fn build_tagged_index(
-    tagged_words: Vec<(WordEntryComplete, bool)>,
+    tagged_words: Vec<(String, WordEntryComplete, bool)>,
 ) -> Vec<WordWithTaggedEntries> {
     let mut word_groups: HashMap<String, (Vec<WordEntryComplete>, Vec<WordEntryComplete>)> =
         HashMap::new();
 
-    for (word_entry, is_monolingual) in tagged_words {
+    for (word_str, word_entry, is_monolingual) in tagged_words {
         let entry = word_groups
-            .entry(word_entry.word.clone())
+            .entry(word_str)
             .or_insert((Vec::new(), Vec::new()));
         if is_monolingual {
             entry.0.push(word_entry);
@@ -371,12 +398,15 @@ mod tests {
     use std::io::Cursor;
     use tarkka::{WordEntryComplete, WordTag};
 
-    fn create_test_word(word: &str, pos: &str, gloss: &str) -> WordEntryComplete {
+    fn create_test_word(_word: &str, pos: &str, gloss: &str) -> WordEntryComplete {
         WordEntryComplete {
-            word: word.to_string(),
             senses: vec![tarkka::Sense {
                 pos: pos.to_string(),
-                glosses: Some(vec![gloss.to_string()]),
+                glosses: Some(vec![tarkka::Gloss {
+                    shared_prefix_count: 0,
+                    new_categories: None,
+                    gloss: gloss.to_string(),
+                }]),
                 form_of: None,
             }],
             hyphenations: None,
@@ -388,25 +418,45 @@ mod tests {
     fn test_build_tagged_index() {
         let test_words = vec![
             (
+                "dictate".to_string(),
                 create_test_word("dictate", "verb", "to say words aloud"),
                 true,
             ),
             (
+                "dictionary".to_string(),
                 create_test_word("dictionary", "noun", "a book of word definitions"),
                 true,
             ),
             (
+                "dictionary".to_string(),
                 create_test_word("dictionary", "noun", "a reference book"),
                 false,
             ),
             (
+                "dictoto".to_string(),
                 create_test_word("dictoto", "noun", "fictional word for testing"),
                 true,
             ),
-            (create_test_word("pa", "noun", "short word"), false),
-            (create_test_word("papa", "noun", "father"), true),
-            (create_test_word("papo", "noun", "chat"), true),
-            (create_test_word("potato", "noun", "a vegetable"), false),
+            (
+                "pa".to_string(),
+                create_test_word("pa", "noun", "short word"),
+                false,
+            ),
+            (
+                "papa".to_string(),
+                create_test_word("papa", "noun", "father"),
+                true,
+            ),
+            (
+                "papo".to_string(),
+                create_test_word("papo", "noun", "chat"),
+                true,
+            ),
+            (
+                "potato".to_string(),
+                create_test_word("potato", "noun", "a vegetable"),
+                false,
+            ),
         ];
 
         let result = build_tagged_index(test_words);
@@ -445,25 +495,45 @@ mod tests {
     fn test_tagged_write_read_roundtrip() {
         let test_words = vec![
             (
+                "dictate".to_string(),
                 create_test_word("dictate", "verb", "to say words aloud"),
                 true,
             ),
             (
+                "dictionary".to_string(),
                 create_test_word("dictionary", "noun", "a book of word definitions"),
                 true,
             ),
             (
+                "dictionary".to_string(),
                 create_test_word("dictionary", "noun", "reference book"),
                 false,
             ),
             (
+                "dictoto".to_string(),
                 create_test_word("dictoto", "noun", "fictional word for testing"),
                 true,
             ),
-            (create_test_word("pa", "noun", "short word"), false),
-            (create_test_word("papa", "noun", "father"), true),
-            (create_test_word("papo", "noun", "chat"), true),
-            (create_test_word("potato", "noun", "a vegetable"), false),
+            (
+                "pa".to_string(),
+                create_test_word("pa", "noun", "short word"),
+                false,
+            ),
+            (
+                "papa".to_string(),
+                create_test_word("papa", "noun", "father"),
+                true,
+            ),
+            (
+                "papo".to_string(),
+                create_test_word("papo", "noun", "chat"),
+                true,
+            ),
+            (
+                "potato".to_string(),
+                create_test_word("potato", "noun", "a vegetable"),
+                false,
+            ),
         ];
 
         let tagged_words = build_tagged_index(test_words);
@@ -482,12 +552,12 @@ mod tests {
         assert_eq!(word.entries.len(), 2); // Exactly 2 entries for Both tag
         assert_eq!(word.entries[0].senses[0].pos, "noun"); // First entry is monolingual
         assert_eq!(
-            word.entries[0].senses[0].glosses.as_ref().unwrap()[0],
+            word.entries[0].senses[0].glosses.as_ref().unwrap()[0].gloss,
             "a book of word definitions"
         );
         assert_eq!(word.entries[1].senses[0].pos, "noun"); // Second entry is English
         assert_eq!(
-            word.entries[1].senses[0].glosses.as_ref().unwrap()[0],
+            word.entries[1].senses[0].glosses.as_ref().unwrap()[0].gloss,
             "reference book"
         );
 
