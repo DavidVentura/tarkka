@@ -1,5 +1,5 @@
 use crate::reader::DictionaryReader;
-use crate::{AggregatedWord, Gloss, PosGlosses};
+use crate::{WordWithTaggedEntries, WordTag};
 use std::fs::File;
 
 extern crate jni;
@@ -49,8 +49,8 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeLookup(
     let reader = unsafe { &mut *(reader_ptr as *mut DictionaryReader<File>) };
 
     match reader.lookup(&word) {
-        Ok(Some(aggregated_word)) => unsafe {
-            create_aggregated_word_jobject(&mut env, &aggregated_word)
+        Ok(Some(word_with_entries)) => unsafe {
+            create_word_with_tagged_entries_jobject(&mut env, &word_with_entries)
         },
         _ => std::ptr::null_mut(),
     }
@@ -67,44 +67,38 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeClose(
     }
 }
 
-unsafe fn create_aggregated_word_jobject(env: &mut JNIEnv, word: &AggregatedWord) -> jobject {
-    // Create ArrayList for pos_glosses
-    let pos_glosses_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+unsafe fn create_word_with_tagged_entries_jobject(env: &mut JNIEnv, word: &WordWithTaggedEntries) -> jobject {
+    // Create ArrayList for entries
+    let entries_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
         Ok(list) => list,
         Err(_) => return std::ptr::null_mut(),
     };
 
-    for pos_gloss in &word.pos_glosses {
-        let pos_gloss_obj = create_pos_glosses_jobject(env, pos_gloss);
-        if pos_gloss_obj.is_null() {
+    for entry in &word.entries {
+        let entry_obj = create_word_entry_complete_jobject(env, entry);
+        if entry_obj.is_null() {
             return std::ptr::null_mut();
         }
 
         let _ = env.call_method(
-            &pos_glosses_list,
+            &entries_list,
             "add",
             "(Ljava/lang/Object;)Z",
-            &[(&unsafe { JObject::from_raw(pos_gloss_obj) }).into()],
+            &[(&unsafe { JObject::from_raw(entry_obj) }).into()],
         );
     }
 
-    // Create string lists for optional fields
-    let hyphenation_list = create_string_list(env, word.hyphenation.as_ref());
-    let form_of_list = create_string_list(env, word.form_of.as_ref());
-    let ipa_sound_list = create_string_list(env, word.ipa_sound.as_ref());
-
-    // Create AggregatedWord object
     let word_string = env.new_string(&word.word).unwrap();
+    let tag_value = word.tag as i32;
 
+    // Create WordWithTaggedEntries object
     match env.new_object(
-        "dev/davidv/translator/AggregatedWord",
-        "(Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;)V",
+        "dev/davidv/translator/WordWithTaggedEntries",
+        "(Ljava/lang/String;ILjava/util/List;)V",
         &[
             (&word_string).into(),
-            (&pos_glosses_list).into(),
-            (&unsafe { JObject::from_raw(hyphenation_list) }).into(),
-            (&unsafe { JObject::from_raw(form_of_list) }).into(),
-            (&unsafe { JObject::from_raw(ipa_sound_list) }).into(),
+            tag_value.into(),
+            (&entries_list).into(),
         ],
     ) {
         Ok(obj) => obj.into_raw(),
@@ -112,49 +106,136 @@ unsafe fn create_aggregated_word_jobject(env: &mut JNIEnv, word: &AggregatedWord
     }
 }
 
-unsafe fn create_pos_glosses_jobject(env: &mut JNIEnv, pos_gloss: &PosGlosses) -> jobject {
-    let pos_string = env.new_string(&pos_gloss.pos).unwrap();
-
-    let glosses_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+unsafe fn create_word_entry_complete_jobject(env: &mut JNIEnv, entry: &crate::WordEntryComplete) -> jobject {
+    let word_string = env.new_string(&entry.word).unwrap();
+    
+    // Create senses list
+    let senses_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
         Ok(list) => list,
         Err(_) => return std::ptr::null_mut(),
     };
 
-    for gloss in &pos_gloss.glosses {
-        let gloss_obj = create_gloss_jobject(env, gloss);
-        if gloss_obj.is_null() {
+    for sense in &entry.senses {
+        let sense_obj = create_sense_jobject(env, sense);
+        if sense_obj.is_null() {
             return std::ptr::null_mut();
         }
 
         let _ = env.call_method(
-            &glosses_list,
+            &senses_list,
             "add",
             "(Ljava/lang/Object;)Z",
-            &[(&unsafe { JObject::from_raw(gloss_obj) }).into()],
+            &[(&unsafe { JObject::from_raw(sense_obj) }).into()],
         );
     }
 
+    // Create hyphenations list
+    let hyphenations_list = if let Some(hyphenations) = &entry.hyphenations {
+        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+            Ok(list) => list,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        
+        for hyphenation in hyphenations {
+            let parts_list = create_string_list(env, Some(&hyphenation.parts));
+            let _ = env.call_method(
+                &list,
+                "add",
+                "(Ljava/lang/Object;)Z",
+                &[(&unsafe { JObject::from_raw(parts_list) }).into()],
+            );
+        }
+        list.into_raw()
+    } else {
+        std::ptr::null_mut()
+    };
+
+    // Create sounds list  
+    let sounds_list = if let Some(sounds) = &entry.sounds {
+        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+            Ok(list) => list,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        
+        for sound in sounds {
+            let ipa_string = if let Some(ipa) = &sound.ipa {
+                env.new_string(ipa).unwrap()
+            } else {
+                env.new_string("").unwrap()
+            };
+            
+            let sound_obj = match env.new_object(
+                "dev/davidv/translator/Sound",
+                "(Ljava/lang/String;)V",
+                &[(&ipa_string).into()],
+            ) {
+                Ok(obj) => obj,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            
+            let _ = env.call_method(
+                &list,
+                "add", 
+                "(Ljava/lang/Object;)Z",
+                &[(&sound_obj).into()],
+            );
+        }
+        list.into_raw()
+    } else {
+        std::ptr::null_mut()
+    };
+
     match env.new_object(
-        "dev/davidv/translator/PosGlosses",
-        "(Ljava/lang/String;Ljava/util/List;)V",
-        &[(&pos_string).into(), (&glosses_list).into()],
+        "dev/davidv/translator/WordEntryComplete",
+        "(Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;)V",
+        &[
+            (&word_string).into(),
+            (&senses_list).into(),
+            (&unsafe { JObject::from_raw(hyphenations_list) }).into(),
+            (&unsafe { JObject::from_raw(sounds_list) }).into(),
+        ],
     ) {
         Ok(obj) => obj.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
 }
 
-unsafe fn create_gloss_jobject(env: &mut JNIEnv, gloss: &Gloss) -> jobject {
-    let gloss_string = env.new_string(&gloss.gloss).unwrap();
-    let categories_list = create_string_list(env, Some(&gloss.new_categories));
+unsafe fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobject {
+    let pos_string = env.new_string(&sense.pos).unwrap();
+    
+    let glosses_list = if let Some(glosses) = &sense.glosses {
+        create_string_list(env, Some(glosses))
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let form_of_list = if let Some(form_of) = &sense.form_of {
+        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+            Ok(list) => list,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        
+        for form in form_of {
+            let form_word = env.new_string(&form.word).unwrap();
+            let _ = env.call_method(
+                &list,
+                "add",
+                "(Ljava/lang/Object;)Z",
+                &[(&form_word).into()],
+            );
+        }
+        list.into_raw()
+    } else {
+        std::ptr::null_mut()
+    };
 
     match env.new_object(
-        "dev/davidv/translator/Gloss",
-        "(ILjava/lang/String;Ljava/util/List;)V",
+        "dev/davidv/translator/Sense",
+        "(Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V",
         &[
-            (gloss.shared_prefix_count as i32).into(),
-            (&gloss_string).into(),
-            (&unsafe { JObject::from_raw(categories_list) }).into(),
+            (&pos_string).into(),
+            (&unsafe { JObject::from_raw(glosses_list) }).into(),
+            (&unsafe { JObject::from_raw(form_of_list) }).into(),
         ],
     ) {
         Ok(obj) => obj.into_raw(),

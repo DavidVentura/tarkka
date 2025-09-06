@@ -1,47 +1,72 @@
-use tarkka::{AggregatedWord, HEADER_SIZE, PosGlosses, WordEntry, WordEntryComplete};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::time::Instant;
+use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
+use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
 
 pub mod reader;
 
-fn main() {
-    let lang = "es";
-    let good_words = match File::open(format!("filtered-{lang}-raw-wiktextract-data.jsonl")) {
+fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(WordEntryComplete, bool)> {
+    let good_words = match File::open(format!(
+        "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
+    )) {
         Ok(mut f) => {
             println!("parsing json from pre-filtered");
             let mut s = String::new();
             f.read_to_string(&mut s).unwrap();
-            serde_json::from_str(s.as_str()).unwrap()
+            let kaikki_words: Vec<KaikkiWordEntry> = serde_json::from_str(s.as_str()).unwrap();
+            let words: Vec<WordEntryComplete> = kaikki_words
+                .into_iter()
+                .map(|kw| kw.to_word_entry_complete())
+                .collect();
+            let is_monolingual = word_lang == gloss_lang;
+            words.into_iter().map(|w| (w, is_monolingual)).collect()
             // serde_json::from_reader(f).unwrap()
             // much slower??
         }
         Err(_) => {
             println!("filtered not found, creating");
-            let f = File::open(format!("{lang}-raw-wiktextract-data.jsonl")).unwrap();
+            let f = File::open(format!("{gloss_lang}-raw-wiktextract-data.jsonl")).unwrap();
             let s = Instant::now();
-            let good_words = filter(lang, f);
+            let good_words = filter(word_lang, f);
             println!("Filter took {:?}", s.elapsed());
             let s = Instant::now();
             {
-                let mut f =
-                    File::create(format!("filtered-{lang}-raw-wiktextract-data.jsonl")).unwrap();
+                let mut f = File::create(format!(
+                    "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
+                ))
+                .unwrap();
                 let ser = serde_json::to_string_pretty(&good_words).unwrap();
                 f.write_all(ser.as_bytes()).unwrap();
             }
             println!("serialize took {:?}", s.elapsed());
+            let is_monolingual = word_lang == gloss_lang;
             good_words
+                .into_iter()
+                .map(|w| (w, is_monolingual))
+                .collect()
         }
     };
+    good_words
+}
+
+fn main() {
+    let word_lang = "es";
+    let good_words1 = lang_words(word_lang, "es");
+    let mut good_words2 = lang_words(word_lang, "en");
+    println!("entries ES {} EN {}", good_words1.len(), good_words2.len());
+
+    let mut all_tagged_entries = good_words1;
+    all_tagged_entries.append(&mut good_words2);
 
     let s = Instant::now();
-    let words = build_index(good_words);
+    let words = build_tagged_index(all_tagged_entries);
     println!("Build index took {:?}", s.elapsed());
 
     let s = Instant::now();
-    let file = File::create(format!("{lang}-dictionary.dict")).unwrap();
-    write(file, words);
+    let file = File::create(format!("{word_lang}-multi-dictionary.dict")).unwrap();
+    write_tagged(file, words);
     println!("writing took {:?}", s.elapsed());
 }
 
@@ -49,9 +74,9 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
     a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
-pub fn write<W: Write>(mut w: W, sorted_words: Vec<AggregatedWord>) {
+pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>) {
     let s = Instant::now();
-    let mut groups: BTreeMap<[u8; 3], Vec<&AggregatedWord>> = BTreeMap::new();
+    let mut groups: BTreeMap<[u8; 3], Vec<&WordWithTaggedEntries>> = BTreeMap::new();
     for word in &sorted_words {
         let b = word.word.as_bytes();
         let l1_group = match b.len() {
@@ -91,7 +116,6 @@ pub fn write<W: Write>(mut w: W, sorted_words: Vec<AggregatedWord>) {
             let suffix = &current_word.as_bytes()[shared_len..];
 
             shared_prefixes += shared_len;
-            // Format: [shared_prefix_len(1b)][suffix_len 1b][suffix][size 2b]
             assert!(shared_len <= 127, "Shared prefix too long: {}", shared_len);
             assert!(suffix.len() <= 255, "Suffix too long: {}", suffix.len());
             assert!(
@@ -109,8 +133,6 @@ pub fn write<W: Write>(mut w: W, sorted_words: Vec<AggregatedWord>) {
             encoder.write(&[suffix.len() as u8]).unwrap();
             encoder.write(suffix).unwrap();
             encoder.write(&ser_size_b).unwrap();
-            // encoding `entry_size` as a 2b LEB saves 70KiB on
-            // the english dict, not worth the complexity
 
             let fixed_ovh = 1 + 1 + ser_size_b.len();
             debug_assert!(fixed_ovh <= 4);
@@ -136,9 +158,7 @@ pub fn write<W: Write>(mut w: W, sorted_words: Vec<AggregatedWord>) {
 
             prev_word = current_word;
         }
-        // ^ l2
 
-        // Level 1: [3-byte prefix][l2 size u32][binary offset u32]
         level1_data.extend(l1_group);
         level1_data.extend(l2_raw_size.to_le_bytes());
         level1_data.extend(group_binary_start.to_le_bytes());
@@ -148,26 +168,24 @@ pub fn write<W: Write>(mut w: W, sorted_words: Vec<AggregatedWord>) {
     println!("saved {shared_prefixes}b with prefix thing");
     println!("compressed {:?}", s.elapsed());
 
-    // Write all JSON data to encoder
     let mut total_ser_size = 0u32;
     encoder.write_all(&all_serialized).unwrap();
     total_ser_size += all_serialized.len() as u32;
     encoder.finish().unwrap();
     println!("finish compress {:?}", s.elapsed());
 
-    w.write_all(b"DICT").unwrap(); // magic
+    w.write_all(b"DICT").unwrap();
     w.write_all(&(level1_data.len() as u32).to_le_bytes())
-        .unwrap(); // level1 size
-    w.write_all(&(level2_size as u32).to_le_bytes()).unwrap(); // level2 size
-    w.write_all(&total_ser_size.to_le_bytes()).unwrap(); // json data size
-    // ^^ header = 16b
+        .unwrap();
+    w.write_all(&(level2_size as u32).to_le_bytes()).unwrap();
+    w.write_all(&total_ser_size.to_le_bytes()).unwrap();
     w.write_all(&level1_data).unwrap();
     w.write_all(&output).unwrap();
 
     let compressed_ser_sz = output.len() - level2_size as usize;
 
     println!("Created dictionary.dict with {} words", sorted_words.len());
-    println!("Header size (static) {}", HEADER_SIZE); // DICT + l1 len + l2 size + ser size
+    println!("Header size (static) {}", HEADER_SIZE);
     println!("Level 1 starts at {}", HEADER_SIZE);
     println!("Level 1 size: {} bytes", level1_data.len());
     println!(
@@ -197,8 +215,9 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComple
             continue;
         }
 
-        let word: WordEntry = serde_json::from_str(&line).unwrap();
-        match word.lang_code {
+        // First parse as basic WordEntry to check lang and word validity
+        let word_entry: WordEntry = serde_json::from_str(&line).unwrap();
+        match word_entry.lang_code {
             None => continue,
             Some(lang_code) => {
                 if lang_code != wanted_lang {
@@ -206,7 +225,7 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComple
                 }
             }
         }
-        match word.word {
+        match word_entry.word {
             Some(w) => {
                 // special chinese comma
                 if w.contains(" ") || w.contains("，") {
@@ -221,17 +240,19 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComple
             }
         }
 
-        match word.pos {
-            None => continue,
-            Some(pos) => {
-                if unwanted_pos.contains(&pos.as_str()) {
-                    continue;
-                }
-            }
-        }
         // ^^ parseable
-        // vv parse
-        let word: WordEntryComplete = serde_json::from_str(&line).unwrap();
+        // vv parse as complete entry
+        let kaikki_word: KaikkiWordEntry = serde_json::from_str(&line).unwrap();
+        let word = kaikki_word.to_word_entry_complete();
+
+        // Check POS at the sense level
+        let has_unwanted_pos = word
+            .senses
+            .iter()
+            .any(|sense| unwanted_pos.contains(&sense.pos.as_str()));
+        if has_unwanted_pos {
+            continue;
+        }
         // no definitions, not the most useful dictionary
         if word.senses.iter().all(|s| s.glosses.is_none()) {
             continue;
@@ -241,257 +262,120 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<WordEntryComple
     words
 }
 
-/// Returns SORTED
-pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
-    let mut aggregated_words: HashMap<&str, AggregatedWord> = HashMap::with_capacity(1_000_000);
-    let s = Instant::now();
-    for i in 0..words.len() {
-        let word = &words[i];
-        // there are exactly 0 or 1 hyphenations
-        // this was not true
-        let hyphenation = if let Some(ref h) = word.hyphenations {
-            // FIXME
-            // println!("{h:?}");
-            // assert!(h.len() <= 1);
-            Some(h[0].parts.clone())
-        } else {
-            None
-        };
-
-        let mut all_form_of = Vec::new();
-
-        // Create a temporary structure to hold category paths during processing
-        struct TempGloss {
-            category_path: Vec<String>,
-            gloss: String,
-        }
-
-        let mut temp_glosses = Vec::new();
-        for sense in &word.senses {
-            if let Some(glosses) = &sense.glosses {
-                if glosses.len() > 1 {
-                    let category_path = glosses[0..glosses.len() - 1].to_vec();
-                    let gloss = glosses[glosses.len() - 1].clone();
-                    temp_glosses.push(TempGloss {
-                        category_path,
-                        gloss,
-                    });
-                } else if glosses.len() == 1 {
-                    temp_glosses.push(TempGloss {
-                        category_path: vec![],
-                        gloss: glosses[0].clone(),
-                    });
-                }
-            }
-            if let Some(form_of) = &sense.form_of {
-                all_form_of.extend(form_of.iter().map(|f| f.word.clone()));
-            }
-        }
-
-        // Consolidate glosses: if we have an uncategorized gloss that matches a category,
-        // convert the standalone gloss to be grouped under the category
-        let mut consolidated_glosses = Vec::new();
-        let mut used_indices = std::collections::HashSet::new();
-
-        for (i, gloss) in temp_glosses.iter().enumerate() {
-            if used_indices.contains(&i) {
-                continue;
-            }
-
-            if gloss.category_path.is_empty() {
-                // Check if this gloss text appears as a category in other entries
-                let mut found_as_category = false;
-                for (j, other_gloss) in temp_glosses.iter().enumerate() {
-                    if i != j
-                        && !other_gloss.category_path.is_empty()
-                        && other_gloss.category_path[0] == gloss.gloss
-                    {
-                        found_as_category = true;
-                        break;
-                    }
-                }
-
-                if found_as_category {
-                    // This standalone gloss should be converted to a category
-                    // Don't add it as a standalone - it will be handled as a category header
-                    used_indices.insert(i);
-
-                    // Find all glosses that use this as a category and add them
-                    for (j, other_gloss) in temp_glosses.iter().enumerate() {
-                        if i != j
-                            && !other_gloss.category_path.is_empty()
-                            && other_gloss.category_path[0] == gloss.gloss
-                        {
-                            consolidated_glosses.push(TempGloss {
-                                category_path: other_gloss.category_path.clone(),
-                                gloss: other_gloss.gloss.clone(),
-                            });
-                            used_indices.insert(j);
-                        }
-                    }
-                } else {
-                    // Keep as uncategorized
-                    consolidated_glosses.push(TempGloss {
-                        category_path: gloss.category_path.clone(),
-                        gloss: gloss.gloss.clone(),
-                    });
-                    used_indices.insert(i);
-                }
-            } else {
-                // Check if this category already has a standalone version
-                let mut has_standalone = false;
-                for (j, other_gloss) in temp_glosses.iter().enumerate() {
-                    if i != j
-                        && other_gloss.category_path.is_empty()
-                        && other_gloss.gloss == gloss.category_path[0]
-                    {
-                        has_standalone = true;
-                        break;
-                    }
-                }
-
-                if !has_standalone {
-                    // Add this categorized gloss normally
-                    consolidated_glosses.push(TempGloss {
-                        category_path: gloss.category_path.clone(),
-                        gloss: gloss.gloss.clone(),
-                    });
-                    used_indices.insert(i);
-                }
-                // If it has a standalone version, it will be handled above
-            }
-        }
-
-        // Do not sort consolidated_glosses; they are supposed to come in order
-        // and there's _some amount_ of relevancy to the order in wiktionary
-        // Convert to compressed format using prefix compression
-        let mut processed_glosses = Vec::new();
-        let mut last_category_path: Vec<String> = Vec::new();
-
-        for consolidated_gloss in consolidated_glosses {
-            // Find common prefix with previous gloss
-            let mut shared_count = 0;
-            while shared_count < last_category_path.len()
-                && shared_count < consolidated_gloss.category_path.len()
-                && last_category_path[shared_count]
-                    == consolidated_gloss.category_path[shared_count]
-            {
-                shared_count += 1;
-            }
-
-            // New categories are the ones after the shared prefix
-            let new_categories = consolidated_gloss.category_path[shared_count..].to_vec();
-
-            processed_glosses.push(tarkka::Gloss {
-                shared_prefix_count: shared_count as u8,
-                new_categories,
-                gloss: consolidated_gloss.gloss,
-            });
-
-            // Update last category path for next iteration
-            last_category_path = consolidated_gloss.category_path;
-        }
-
-        let ipa_sound = if let Some(sounds) = &word.sounds {
-            let ipa_strings: Vec<String> = sounds.iter().filter_map(|s| s.ipa.clone()).collect();
-            if ipa_strings.is_empty() {
-                None
-            } else {
-                // TODO: dedup
-                Some(ipa_strings)
-            }
-        } else {
-            None
-        };
-
-        let form_of = if all_form_of.is_empty() {
-            None
-        } else {
-            Some(all_form_of)
-        };
-
-        aggregated_words
-            .entry(&word.word)
-            .and_modify(|agg| {
-                if let Some(existing_pos) = agg.pos_glosses.iter_mut().find(|pg| pg.pos == word.pos)
-                {
-                    if (existing_pos.glosses.len() + processed_glosses.len()) >= 256 {
-                        println!("WTF? extend {word:?}");
-                    } else {
-                        existing_pos.glosses.extend(processed_glosses.clone());
-                    }
-                } else {
-                    if processed_glosses.len() > 256 {
-                        println!("WTF? push {word:?}");
-                    } else {
-                        agg.pos_glosses.push(PosGlosses {
-                            pos: word.pos.clone(),
-                            glosses: processed_glosses.clone(),
-                        });
-                    }
-                }
-                if let Some(form_of) = &form_of {
-                    if let Some(existing_form_of) = &mut agg.form_of {
-                        existing_form_of.extend(form_of.clone());
-                    } else {
-                        agg.form_of = Some(form_of.clone());
-                    }
-                }
-                if let Some(ipa_sound) = &ipa_sound {
-                    if let Some(existing_ipa_sound) = &mut agg.ipa_sound {
-                        existing_ipa_sound.extend(ipa_sound.clone());
-                    } else {
-                        agg.ipa_sound = Some(ipa_sound.clone());
-                    }
-                }
-            })
-            .or_insert(AggregatedWord {
-                word: word.word.clone(),
-                pos_glosses: vec![PosGlosses {
-                    pos: word.pos.clone(),
-                    glosses: processed_glosses[..std::cmp::min(255, processed_glosses.len())]
-                        .to_vec(),
-                }],
-                hyphenation,
-                form_of,
-                ipa_sound,
-            });
+fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
+    if entries.is_empty() {
+        panic!("Cannot aggregate empty entries");
     }
-    println!("stage 1 {:?}", s.elapsed());
-    let s = Instant::now();
 
-    // some verbs have a `form_of` referencing a word that's not yet on the dictionary
-    // remove it. presenting a 404 link to the user is terrible
-    let word_keys: HashSet<&str> = aggregated_words.keys().copied().collect();
-    for aggregated_word in aggregated_words.values_mut() {
-        if let Some(form_of) = &mut aggregated_word.form_of {
-            form_of.retain(|word| word_keys.contains(word.as_str()));
-            if form_of.is_empty() {
-                aggregated_word.form_of = None;
+    if entries.len() == 1 {
+        return entries.into_iter().next().unwrap();
+    }
+
+    // Take the first entry as base and aggregate others into it
+    let mut base = entries[0].clone();
+
+    for entry in entries.into_iter().skip(1) {
+        // Aggregate senses with POS preserved in each sense
+        for sense in entry.senses {
+            base.senses.push(sense);
+        }
+
+        // Merge sounds (deduplicate)
+        if let Some(entry_sounds) = entry.sounds {
+            if let Some(base_sounds) = &mut base.sounds {
+                for sound in entry_sounds {
+                    if !base_sounds.iter().any(|s| s.ipa == sound.ipa) {
+                        base_sounds.push(sound);
+                    }
+                }
+            } else {
+                base.sounds = Some(entry_sounds);
+            }
+        }
+
+        // Merge hyphenations (deduplicate)
+        if let Some(entry_hyphenations) = entry.hyphenations {
+            if let Some(base_hyphenations) = &mut base.hyphenations {
+                for hyphenation in entry_hyphenations {
+                    if !base_hyphenations
+                        .iter()
+                        .any(|h| h.parts == hyphenation.parts)
+                    {
+                        base_hyphenations.push(hyphenation);
+                    }
+                }
+            } else {
+                base.hyphenations = Some(entry_hyphenations);
             }
         }
     }
-    println!("stage 2 {:?}", s.elapsed());
 
-    let s = Instant::now();
-    let mut ret: Vec<AggregatedWord> = aggregated_words.into_values().collect();
-    ret.sort_by(|a, b| a.word.cmp(&b.word));
-    println!("sorted {:?}", s.elapsed());
-    ret
+    base
+}
+
+pub fn build_tagged_index(
+    tagged_words: Vec<(WordEntryComplete, bool)>,
+) -> Vec<WordWithTaggedEntries> {
+    let mut word_groups: HashMap<String, (Vec<WordEntryComplete>, Vec<WordEntryComplete>)> =
+        HashMap::new();
+
+    for (word_entry, is_monolingual) in tagged_words {
+        let entry = word_groups
+            .entry(word_entry.word.clone())
+            .or_insert((Vec::new(), Vec::new()));
+        if is_monolingual {
+            entry.0.push(word_entry);
+        } else {
+            entry.1.push(word_entry);
+        }
+    }
+
+    let mut result: Vec<WordWithTaggedEntries> = word_groups
+        .into_iter()
+        .map(|(word, (mono_entries, eng_entries))| {
+            let tag = match (mono_entries.is_empty(), eng_entries.is_empty()) {
+                (false, true) => WordTag::Monolingual,
+                (true, false) => WordTag::English,
+                (false, false) => WordTag::Both,
+                (true, true) => unreachable!("Empty word group"),
+            };
+
+            // Aggregate entries of the same type into single comprehensive entries
+            let entries = match tag {
+                WordTag::Monolingual => {
+                    vec![aggregate_entries(mono_entries)]
+                }
+                WordTag::English => {
+                    vec![aggregate_entries(eng_entries)]
+                }
+                WordTag::Both => {
+                    vec![
+                        aggregate_entries(mono_entries),
+                        aggregate_entries(eng_entries),
+                    ]
+                }
+            };
+
+            WordWithTaggedEntries { word, tag, entries }
+        })
+        .collect();
+
+    result.sort_by(|a, b| a.word.cmp(&b.word));
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::reader::DictionaryReader;
-    use crate::{Sense, WordEntryComplete};
     use std::io::Cursor;
+    use tarkka::{WordEntryComplete, WordTag};
 
     fn create_test_word(word: &str, pos: &str, gloss: &str) -> WordEntryComplete {
         WordEntryComplete {
             word: word.to_string(),
-            pos: pos.to_string(),
-            senses: vec![Sense {
+            senses: vec![tarkka::Sense {
+                pos: pos.to_string(),
                 glosses: Some(vec![gloss.to_string()]),
                 form_of: None,
             }],
@@ -501,18 +385,31 @@ mod tests {
     }
 
     #[test]
-    fn test_build_index_with_prefix_cases() {
+    fn test_build_tagged_index() {
         let test_words = vec![
-            create_test_word("dictate", "verb", "to say words aloud"),
-            create_test_word("dictionary", "noun", "a book of word definitions"),
-            create_test_word("dictoto", "noun", "fictional word for testing"),
-            create_test_word("pa", "noun", "short word"),
-            create_test_word("papa", "noun", "father"),
-            create_test_word("papo", "noun", "chat"),
-            create_test_word("potato", "noun", "a vegetable"),
+            (
+                create_test_word("dictate", "verb", "to say words aloud"),
+                true,
+            ),
+            (
+                create_test_word("dictionary", "noun", "a book of word definitions"),
+                true,
+            ),
+            (
+                create_test_word("dictionary", "noun", "a reference book"),
+                false,
+            ),
+            (
+                create_test_word("dictoto", "noun", "fictional word for testing"),
+                true,
+            ),
+            (create_test_word("pa", "noun", "short word"), false),
+            (create_test_word("papa", "noun", "father"), true),
+            (create_test_word("papo", "noun", "chat"), true),
+            (create_test_word("potato", "noun", "a vegetable"), false),
         ];
 
-        let result = build_index(test_words);
+        let result = build_tagged_index(test_words);
 
         assert_eq!(result.len(), 7);
 
@@ -530,29 +427,49 @@ mod tests {
             ]
         );
 
-        for aggregated_word in &result {
-            assert!(!aggregated_word.pos_glosses.is_empty());
-            assert!(!aggregated_word.pos_glosses[0].glosses.is_empty());
-            assert!(!aggregated_word.pos_glosses[0].glosses[0].gloss.is_empty());
-        }
+        // Check tags
+        let dictionary = result.iter().find(|w| w.word == "dictionary").unwrap();
+        assert!(matches!(dictionary.tag, WordTag::Both));
+        assert_eq!(dictionary.entries.len(), 2); // Exactly 2 entries for Both tag
+
+        let dictate = result.iter().find(|w| w.word == "dictate").unwrap();
+        assert!(matches!(dictate.tag, WordTag::Monolingual));
+        assert_eq!(dictate.entries.len(), 1);
+
+        let pa = result.iter().find(|w| w.word == "pa").unwrap();
+        assert!(matches!(pa.tag, WordTag::English));
+        assert_eq!(pa.entries.len(), 1);
     }
 
     #[test]
-    fn test_build_index_write_read_roundtrip() {
+    fn test_tagged_write_read_roundtrip() {
         let test_words = vec![
-            create_test_word("dictate", "verb", "to say words aloud"),
-            create_test_word("dictionary", "noun", "a book of word definitions"),
-            create_test_word("dictoto", "noun", "fictional word for testing"),
-            create_test_word("pa", "noun", "short word"),
-            create_test_word("papa", "noun", "father"),
-            create_test_word("papo", "noun", "chat"),
-            create_test_word("potato", "noun", "a vegetable"),
+            (
+                create_test_word("dictate", "verb", "to say words aloud"),
+                true,
+            ),
+            (
+                create_test_word("dictionary", "noun", "a book of word definitions"),
+                true,
+            ),
+            (
+                create_test_word("dictionary", "noun", "reference book"),
+                false,
+            ),
+            (
+                create_test_word("dictoto", "noun", "fictional word for testing"),
+                true,
+            ),
+            (create_test_word("pa", "noun", "short word"), false),
+            (create_test_word("papa", "noun", "father"), true),
+            (create_test_word("papo", "noun", "chat"), true),
+            (create_test_word("potato", "noun", "a vegetable"), false),
         ];
 
-        let aggregated_words = build_index(test_words);
+        let tagged_words = build_tagged_index(test_words);
 
         let mut buffer = Vec::new();
-        write(&mut buffer, aggregated_words);
+        write_tagged(&mut buffer, tagged_words);
 
         let cursor = Cursor::new(buffer);
         let mut dict_reader = DictionaryReader::open(cursor).unwrap();
@@ -561,220 +478,28 @@ mod tests {
         assert!(result.is_some());
         let word = result.unwrap();
         assert_eq!(word.word, "dictionary");
-        assert_eq!(word.pos_glosses[0].pos, "noun");
+        assert!(matches!(word.tag, WordTag::Both));
+        assert_eq!(word.entries.len(), 2); // Exactly 2 entries for Both tag
+        assert_eq!(word.entries[0].senses[0].pos, "noun"); // First entry is monolingual
         assert_eq!(
-            word.pos_glosses[0].glosses[0].gloss,
+            word.entries[0].senses[0].glosses.as_ref().unwrap()[0],
             "a book of word definitions"
+        );
+        assert_eq!(word.entries[1].senses[0].pos, "noun"); // Second entry is English
+        assert_eq!(
+            word.entries[1].senses[0].glosses.as_ref().unwrap()[0],
+            "reference book"
         );
 
         let result = dict_reader.lookup("papa").unwrap();
         assert!(result.is_some());
         let word = result.unwrap();
         assert_eq!(word.word, "papa");
-        assert_eq!(word.pos_glosses[0].pos, "noun");
-        assert_eq!(word.pos_glosses[0].glosses[0].gloss, "father");
+        assert!(matches!(word.tag, WordTag::Monolingual));
+        assert_eq!(word.entries.len(), 1);
+        assert_eq!(word.entries[0].senses[0].pos, "noun");
 
         let result = dict_reader.lookup("nonexistent").unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_category_extraction() {
-        let dog_word = WordEntryComplete {
-            word: "dog".to_string(),
-            pos: "noun".to_string(),
-            senses: vec![
-                Sense {
-                    glosses: Some(vec![
-                        "A mammal of the family Canidae:".to_string(),
-                        "The species Canis familiaris, domesticated for thousands of years.".to_string(),
-                    ]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec![
-                        "A mammal of the family Canidae:".to_string(),
-                        "Any member of the family Canidae, including domestic dogs, wolves, coyotes.".to_string(),
-                    ]),
-                    form_of: None,
-                },
-            ],
-            hyphenations: None,
-            sounds: None,
-        };
-
-        let test_words = vec![dog_word];
-        let result = build_index(test_words);
-
-        assert_eq!(result.len(), 1);
-        let word = &result[0];
-        assert_eq!(word.word, "dog");
-        assert_eq!(word.pos_glosses[0].glosses.len(), 2);
-
-        let first_gloss = &word.pos_glosses[0].glosses[0];
-        // First gloss should have no shared prefix and full category in new_categories
-        assert_eq!(first_gloss.shared_prefix_count, 0);
-        assert_eq!(
-            first_gloss.new_categories,
-            vec!["A mammal of the family Canidae:"]
-        );
-        assert_eq!(
-            first_gloss.gloss,
-            "The species Canis familiaris, domesticated for thousands of years."
-        );
-
-        let second_gloss = &word.pos_glosses[0].glosses[1];
-        // Second gloss should share the category prefix with first gloss
-        assert_eq!(second_gloss.shared_prefix_count, 1); // Shares 1 category with previous
-        assert_eq!(second_gloss.new_categories, Vec::<String>::new()); // No new categories
-        assert_eq!(
-            second_gloss.gloss,
-            "Any member of the family Canidae, including domestic dogs, wolves, coyotes."
-        );
-    }
-
-    #[test]
-    fn test_hierarchical_categories() {
-        let place_word = WordEntryComplete {
-            word: "denmark".to_string(),
-            pos: "noun".to_string(),
-            senses: vec![
-                Sense {
-                    glosses: Some(vec![
-                        "A number of places in other countries:".to_string(),
-                        "town in Western Australia".to_string(),
-                    ]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec![
-                        "A number of places in other countries:".to_string(),
-                        "community in Nova Scotia".to_string(),
-                    ]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec![
-                        "A number of places in other countries:".to_string(),
-                        "{{place|en|place|c/USA}}:".to_string(),
-                        "community in Georgia".to_string(),
-                    ]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec![
-                        "A number of places in other countries:".to_string(),
-                        "{{place|en|place|c/USA}}:".to_string(),
-                        "community in Indiana".to_string(),
-                    ]),
-                    form_of: None,
-                },
-            ],
-            hyphenations: None,
-            sounds: None,
-        };
-
-        let test_words = vec![place_word];
-        let result = build_index(test_words);
-
-        assert_eq!(result.len(), 1);
-        let word = &result[0];
-        assert_eq!(word.word, "denmark");
-        assert_eq!(word.pos_glosses[0].glosses.len(), 4);
-
-        // Test prefix compression in hierarchical categories
-        let gloss0 = &word.pos_glosses[0].glosses[0];
-        assert_eq!(gloss0.shared_prefix_count, 0);
-        assert_eq!(
-            gloss0.new_categories,
-            vec!["A number of places in other countries:"]
-        );
-        assert_eq!(gloss0.gloss, "town in Western Australia");
-
-        let gloss1 = &word.pos_glosses[0].glosses[1];
-        assert_eq!(gloss1.shared_prefix_count, 1); // Shares 1 category with gloss0
-        assert_eq!(gloss1.new_categories, Vec::<String>::new());
-        assert_eq!(gloss1.gloss, "community in Nova Scotia");
-
-        // Nested categories
-        let gloss2 = &word.pos_glosses[0].glosses[2];
-        assert_eq!(gloss2.shared_prefix_count, 1); // Shares 1 category with previous
-        assert_eq!(gloss2.new_categories, vec!["{{place|en|place|c/USA}}:"]);
-        assert_eq!(gloss2.gloss, "community in Georgia");
-
-        let gloss3 = &word.pos_glosses[0].glosses[3];
-        assert_eq!(gloss3.shared_prefix_count, 2); // Shares 2 categories with gloss2
-        assert_eq!(gloss3.new_categories, Vec::<String>::new());
-        assert_eq!(gloss3.gloss, "community in Indiana");
-    }
-
-    #[test]
-    fn test_category_sorting_and_grouping() {
-        let deer_word = WordEntryComplete {
-            word: "deer".to_string(),
-            pos: "noun".to_string(),
-            senses: vec![
-                Sense {
-                    glosses: Some(vec![
-                        "A ruminant mammal with hooves and often antlers, of the family Cervidae."
-                            .to_string(),
-                    ]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec!["The meat of such an animal; venison.".to_string()]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec![
-                        "A ruminant mammal with hooves and often antlers, of the family Cervidae."
-                            .to_string(),
-                        "One of the smaller animals of the family Cervidae.".to_string(),
-                    ]),
-                    form_of: None,
-                },
-                Sense {
-                    glosses: Some(vec![
-                        "Any animal, especially a quadrupedal mammal.".to_string(),
-                    ]),
-                    form_of: None,
-                },
-            ],
-            hyphenations: None,
-            sounds: None,
-        };
-
-        let test_words = vec![deer_word];
-        let result = build_index(test_words);
-
-        assert_eq!(result.len(), 1);
-        let word = &result[0];
-        assert_eq!(word.word, "deer");
-        // After consolidation, we should have 3 glosses:
-        // - Two uncategorized glosses
-        // - One categorized gloss (the standalone "A ruminant mammal..." was consolidated into the category)
-        assert_eq!(word.pos_glosses[0].glosses.len(), 3);
-
-        // Verify the consolidation and compression worked correctly:
-        let gloss0 = &word.pos_glosses[0].glosses[0];
-        assert_eq!(gloss0.shared_prefix_count, 0);
-        assert_eq!(
-            gloss0.new_categories,
-            vec!["A ruminant mammal with hooves and often antlers, of the family Cervidae."]
-        );
-        assert_eq!(
-            gloss0.gloss,
-            "One of the smaller animals of the family Cervidae."
-        );
-
-        let gloss1 = &word.pos_glosses[0].glosses[1];
-        assert_eq!(gloss1.shared_prefix_count, 0); // No shared categories (uncategorized)
-        assert_eq!(gloss1.new_categories, Vec::<String>::new());
-        assert_eq!(gloss1.gloss, "The meat of such an animal; venison.");
-
-        let gloss2 = &word.pos_glosses[0].glosses[2];
-        assert_eq!(gloss2.shared_prefix_count, 0); // No shared categories (uncategorized)
-        assert_eq!(gloss2.new_categories, Vec::<String>::new());
-        assert_eq!(gloss2.gloss, "Any animal, especially a quadrupedal mammal.");
     }
 }

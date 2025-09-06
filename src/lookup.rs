@@ -1,56 +1,110 @@
 use std::{fs::File, time::Instant};
 
-use tarkka::{AggregatedWord, reader::DictionaryReader};
+use tarkka::{WordTag, WordWithTaggedEntries, reader::DictionaryReader};
 
-fn pretty_print(wn: &str, w: AggregatedWord) {
-    let ipa = match w.ipa_sound {
-        Some(ref v) if v.len() > 0 => v.first().unwrap(),
-        _ => "",
+fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
+    // Collect all IPA pronunciations and hyphenations from all entries
+    let mut all_ipa = Vec::new();
+    let mut all_hyphenations = Vec::new();
+
+    for entry in &w.entries {
+        if let Some(sounds) = &entry.sounds {
+            for sound in sounds {
+                if let Some(ipa) = &sound.ipa {
+                    if !all_ipa.contains(ipa) {
+                        all_ipa.push(ipa.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(hyphenations) = &entry.hyphenations {
+            for hyphenation in hyphenations {
+                let hyph_str = hyphenation.parts.join("-");
+                if !all_hyphenations.contains(&hyph_str) {
+                    all_hyphenations.push(hyph_str);
+                }
+            }
+        }
+    }
+
+    // Display word with pronunciation and hyphenation
+    let ipa_str = if all_ipa.is_empty() {
+        "".to_string()
+    } else {
+        all_ipa.join(", ")
+    };
+    let hyph_str = if all_hyphenations.is_empty() {
+        "".to_string()
+    } else {
+        all_hyphenations.join(", ")
     };
 
-    let hyphenation = match w.hyphenation {
-        Some(ref h) if h.len() > 0 => h.join("-"),
-        _ => "".into(),
-    };
-    println!("{wn} - {} - {}", ipa, hyphenation);
-    let mut last_category_path: Vec<String> = vec![];
-    for pg in w.pos_glosses {
-        println!("{}:", pg.pos);
-        for gloss in pg.glosses {
-            // Reconstruct full category path from compressed format
-            let current_category_path = gloss.get_category_path(&last_category_path);
+    println!("{wn} - {} - {}", ipa_str, hyph_str);
 
-            // Find how much of the category path has changed
-            let mut common_len = 0;
-            while common_len < last_category_path.len()
-                && common_len < current_category_path.len()
-                && last_category_path[common_len] == current_category_path[common_len]
-            {
-                common_len += 1;
+    // Display entries based on tag
+    match w.tag {
+        WordTag::Monolingual => {
+            // All entries are monolingual
+            for entry in &w.entries {
+                for sense in &entry.senses {
+                    println!("[MONO] {}:", sense.pos);
+                    if let Some(glosses) = &sense.glosses {
+                        for gloss in glosses {
+                            println!("  - {}", gloss);
+                        }
+                    }
+                }
+            }
+        }
+        WordTag::English => {
+            // All entries are English
+            for entry in &w.entries {
+                for sense in &entry.senses {
+                    println!("[ENG] {}:", sense.pos);
+                    if let Some(glosses) = &sense.glosses {
+                        for gloss in glosses {
+                            println!("  - {}", gloss);
+                        }
+                    }
+                }
+            }
+        }
+        WordTag::Both => {
+            // Exactly 2 entries: first is monolingual, second is English
+            assert_eq!(w.entries.len(), 2, "Both tag must have exactly 2 entries");
+
+            // First entry is monolingual
+            for sense in &w.entries[0].senses {
+                println!("[MONO] {}:", sense.pos);
+                if let Some(glosses) = &sense.glosses {
+                    for gloss in glosses {
+                        println!("  - {}", gloss);
+                    }
+                }
             }
 
-            // Print any new category levels
-            for (i, category) in current_category_path.iter().enumerate().skip(common_len) {
-                let indent = " ".repeat((i + 1) * 2);
-                println!("{}{}", indent, category);
+            // Second entry is English
+            for sense in &w.entries[1].senses {
+                println!("[ENG] {}:", sense.pos);
+                if let Some(glosses) = &sense.glosses {
+                    for gloss in glosses {
+                        println!("  - {}", gloss);
+                    }
+                }
             }
-
-            // Print the gloss with appropriate indentation
-            let indent = " ".repeat((current_category_path.len() + 1) * 2);
-            println!("{}- {}", indent, gloss.gloss);
-
-            last_category_path = current_category_path;
         }
     }
 }
 
 fn main() {
     let s = Instant::now();
-    let f = File::open("en-dictionary.dict").unwrap();
+    //let f = File::open("en-dictionary.dict").unwrap();
+    let f = File::open("es-multi-dictionary.dict").unwrap();
     let mut d = DictionaryReader::open(f).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
-    let lookup = "hot dog";
+    let lookup = "perro";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {

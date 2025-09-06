@@ -1,4 +1,4 @@
-use crate::{AggregatedWord, HEADER_SIZE};
+use crate::{HEADER_SIZE, WordWithTaggedEntries};
 use std::io::Seek;
 use std::io::{Read, SeekFrom};
 
@@ -80,7 +80,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
     pub fn lookup(
         &mut self,
         word: &str,
-    ) -> Result<Option<AggregatedWord>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<WordWithTaggedEntries>, Box<dyn std::error::Error>> {
         let word_bytes = word.as_bytes();
         let l1_group = match word_bytes.len() {
             0 => return Err("Empty word".into()),
@@ -212,15 +212,24 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         offset: u32,
         size: u16,
         word: &str,
-    ) -> Result<AggregatedWord, Box<dyn std::error::Error>> {
+    ) -> Result<WordWithTaggedEntries, Box<dyn std::error::Error>> {
         let mut decompressed = Vec::new();
         self.decoder.set_offset(offset as u64)?;
         self.decoder.set_offset_limit(offset as u64 + size as u64)?;
         std::io::copy(&mut self.decoder, &mut decompressed)?;
 
-        let parsed = AggregatedWord::deserialize(&decompressed, word.to_string())
+        let parsed = WordWithTaggedEntries::deserialize(&decompressed, word.to_string())
             .map_err(|e| -> Box<dyn std::error::Error> { Box::from(e) })?;
 
         Ok(parsed)
     }
+}
+
+fn reuse_vec<T, U>(mut v: Vec<T>) -> Vec<U> {
+    const {
+        assert!(size_of::<T>() == size_of::<U>());
+        assert!(align_of::<T>() == align_of::<U>());
+    }
+    v.clear();
+    v.into_iter().map(|_| unreachable!()).collect()
 }
