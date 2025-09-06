@@ -7,7 +7,16 @@ use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
 
 pub mod reader;
 
-fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(String, WordEntryComplete, bool)> {
+fn lang_words(
+    word_lang: &str,
+    gloss_lang: &str,
+) -> Vec<(
+    String,
+    WordEntryComplete,
+    Vec<tarkka::kaikki::Sound>,
+    Vec<tarkka::Hyphenation>,
+    bool,
+)> {
     let good_words = match File::open(format!(
         "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
     )) {
@@ -17,14 +26,24 @@ fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(String, WordEntryComple
             f.read_to_string(&mut s).unwrap();
             let kaikki_words: Vec<(String, KaikkiWordEntry)> =
                 serde_json::from_str(s.as_str()).unwrap();
-            let words: Vec<(String, WordEntryComplete)> = kaikki_words
+            let words: Vec<(
+                String,
+                WordEntryComplete,
+                Vec<tarkka::kaikki::Sound>,
+                Vec<tarkka::Hyphenation>,
+            )> = kaikki_words
                 .into_iter()
-                .map(|(s, kw)| (s.clone(), kw.to_word_entry_complete()))
+                .map(|(s, kw)| {
+                    let (entry, sounds, hyphenations) = kw.to_word_entry_complete();
+                    (s.clone(), entry, sounds, hyphenations)
+                })
                 .collect();
             let is_monolingual = word_lang == gloss_lang;
             words
                 .into_iter()
-                .map(|(word, w)| (word, w, is_monolingual))
+                .map(|(word, w, sounds, hyphenations)| {
+                    (word, w, sounds, hyphenations, is_monolingual)
+                })
                 .collect()
             // serde_json::from_reader(f).unwrap()
             // much slower??
@@ -48,7 +67,10 @@ fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(String, WordEntryComple
             let is_monolingual = word_lang == gloss_lang;
             good_words
                 .into_iter()
-                .map(|(word, w)| (word, w.to_word_entry_complete(), is_monolingual))
+                .map(|(word, w)| {
+                    let (entry, sounds, hyphenations) = w.to_word_entry_complete();
+                    (word, entry, sounds, hyphenations, is_monolingual)
+                })
                 .collect()
         }
     };
@@ -65,8 +87,12 @@ fn main() {
     all_tagged_entries.append(&mut good_words2);
 
     */
+    /*
     let word_lang = "en";
     let all_tagged_entries = lang_words(word_lang, "en");
+    */
+    let word_lang = "es";
+    let all_tagged_entries = lang_words(word_lang, "es");
 
     let s = Instant::now();
     let words = build_tagged_index(all_tagged_entries);
@@ -219,7 +245,7 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<(String, Kaikki
         match word_entry.word {
             Some(w) => {
                 // special chinese comma
-                if w.contains(" ") || w.contains("，") {
+                if w.contains("，") {
                     // phrases, like 'animal doméstico' don't make sense
                     // in a WORD dictionary
                     continue;
@@ -256,45 +282,58 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<(String, Kaikki
 }
 
 // TODO: this should not take shitty entries with the Kaikki limitatios
-fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
+fn aggregate_entries(
+    entries: Vec<(
+        WordEntryComplete,
+        Vec<tarkka::kaikki::Sound>,
+        Vec<tarkka::Hyphenation>,
+    )>,
+    _is_monolingual_first: bool,
+) -> (
+    WordEntryComplete,
+    Option<String>,
+    Option<tarkka::Hyphenation>,
+) {
     if entries.is_empty() {
         panic!("Cannot aggregate empty entries");
     }
 
+    // Extract sounds and hyphenations from all entries
+    let mut selected_sound = None;
+    let mut selected_hyphenation = None;
+
+    // Priority: first available (monolingual first if is_monolingual_first is true)
+    for (_, sounds, hyphenations) in &entries {
+        if selected_sound.is_none() && !sounds.is_empty() {
+            if let Some(sound) = sounds.first() {
+                if let Some(ref ipa) = sound.ipa {
+                    selected_sound = Some(ipa.clone());
+                }
+            }
+        }
+        if selected_hyphenation.is_none() && !hyphenations.is_empty() {
+            selected_hyphenation = hyphenations.first().cloned();
+        }
+        if selected_sound.is_some() && selected_hyphenation.is_some() {
+            break;
+        }
+    }
+
     if entries.len() == 1 {
-        let mut entry = entries.into_iter().next().unwrap();
+        let (mut entry, _, _) = entries.into_iter().next().unwrap();
         // Still need to compress categories and merge senses even for single entry
         merge_same_pos_senses(&mut entry.senses);
         compress_categories(&mut entry.senses);
-        return entry;
+        return (entry, selected_sound, selected_hyphenation);
     }
 
     // Take the first entry as base and aggregate others into it
-    let mut base = entries[0].clone();
+    let mut base = entries[0].0.clone();
 
-    for entry in entries.into_iter().skip(1) {
+    for (entry, _, _) in entries.into_iter().skip(1) {
         // Aggregate senses with POS preserved in each sense
         for sense in entry.senses {
             base.senses.push(sense);
-        }
-
-        // Merge sounds (deduplicate)
-        for sound in entry.sounds {
-            if sound.ipa.is_none() {
-                continue;
-            }
-            if base.sounds.contains(&sound) {
-                continue;
-            }
-            base.sounds.push(sound);
-        }
-
-        // Merge hyphenations (deduplicate)
-        for hy in entry.hyphenations {
-            if base.hyphenations.contains(&hy) {
-                continue;
-            }
-            base.hyphenations.push(hy);
         }
     }
 
@@ -302,7 +341,7 @@ fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
     merge_same_pos_senses(&mut base.senses);
     compress_categories(&mut base.senses);
 
-    base
+    (base, selected_sound, selected_hyphenation)
 }
 
 fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
@@ -315,17 +354,6 @@ fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
             Some(existing_sense) => {
                 // Merge glosses
                 existing_sense.glosses.extend(sense.glosses);
-
-                // Merge form_of
-                for form_of in sense.form_of {
-                    if !existing_sense
-                        .form_of
-                        .iter()
-                        .any(|f| f.word == form_of.word)
-                    {
-                        existing_sense.form_of.push(form_of);
-                    }
-                }
             }
             None => {
                 pos_to_sense.insert(sense.pos.clone(), sense);
@@ -377,19 +405,38 @@ fn compress_categories(senses: &mut Vec<tarkka::Sense>) {
 }
 
 pub fn build_tagged_index(
-    tagged_words: Vec<(String, WordEntryComplete, bool)>,
+    tagged_words: Vec<(
+        String,
+        WordEntryComplete,
+        Vec<tarkka::kaikki::Sound>,
+        Vec<tarkka::Hyphenation>,
+        bool,
+    )>,
 ) -> Vec<WordWithTaggedEntries> {
-    let mut word_groups: HashMap<String, (Vec<WordEntryComplete>, Vec<WordEntryComplete>)> =
-        HashMap::new();
+    let mut word_groups: HashMap<
+        String,
+        (
+            Vec<(
+                WordEntryComplete,
+                Vec<tarkka::kaikki::Sound>,
+                Vec<tarkka::Hyphenation>,
+            )>,
+            Vec<(
+                WordEntryComplete,
+                Vec<tarkka::kaikki::Sound>,
+                Vec<tarkka::Hyphenation>,
+            )>,
+        ),
+    > = HashMap::new();
 
-    for (word_str, word_entry, is_monolingual) in tagged_words {
+    for (word_str, word_entry, sounds, hyphenations, is_monolingual) in tagged_words {
         let entry = word_groups
             .entry(word_str)
             .or_insert((Vec::new(), Vec::new()));
         if is_monolingual {
-            entry.0.push(word_entry);
+            entry.0.push((word_entry, sounds, hyphenations));
         } else {
-            entry.1.push(word_entry);
+            entry.1.push((word_entry, sounds, hyphenations));
         }
     }
 
@@ -404,22 +451,38 @@ pub fn build_tagged_index(
             };
 
             // Aggregate entries of the same type into single comprehensive entries
-            let entries = match tag {
+            let (entries, selected_sound, selected_hyphenation) = match tag {
                 WordTag::Monolingual => {
-                    vec![aggregate_entries(mono_entries)]
+                    let (entry, sound, hyph) = aggregate_entries(mono_entries, true);
+                    (vec![entry], sound, hyph)
                 }
                 WordTag::English => {
-                    vec![aggregate_entries(eng_entries)]
+                    let (entry, sound, hyph) = aggregate_entries(eng_entries, false);
+                    (vec![entry], sound, hyph)
                 }
                 WordTag::Both => {
-                    vec![
-                        aggregate_entries(mono_entries),
-                        aggregate_entries(eng_entries),
-                    ]
+                    let (mono_entry, mono_sound, mono_hyph) = aggregate_entries(mono_entries, true);
+                    let (eng_entry, eng_sound, eng_hyph) = aggregate_entries(eng_entries, false);
+
+                    // Prefer monolingual sound/hyphenation, fallback to English
+                    let selected_sound = mono_sound.or(eng_sound);
+                    let selected_hyphenation = mono_hyph.or(eng_hyph);
+
+                    (
+                        vec![mono_entry, eng_entry],
+                        selected_sound,
+                        selected_hyphenation,
+                    )
                 }
             };
 
-            WordWithTaggedEntries { word, tag, entries }
+            WordWithTaggedEntries {
+                word,
+                tag,
+                entries,
+                sounds: selected_sound,
+                hyphenations: selected_hyphenation,
+            }
         })
         .collect();
 
@@ -434,65 +497,71 @@ mod tests {
     use std::io::Cursor;
     use tarkka::{WordEntryComplete, WordTag};
 
-    fn create_test_word(_word: &str, pos: &str, gloss: &str) -> WordEntryComplete {
-        WordEntryComplete {
-            senses: vec![tarkka::Sense {
-                pos: pos.to_string(),
-                glosses: vec![tarkka::Gloss {
-                    shared_prefix_count: 0,
-                    new_categories: vec![],
-                    gloss: gloss.to_string(),
+    fn create_test_word(
+        _word: &str,
+        pos: &str,
+        gloss: &str,
+    ) -> (
+        WordEntryComplete,
+        Vec<tarkka::kaikki::Sound>,
+        Vec<tarkka::Hyphenation>,
+    ) {
+        (
+            WordEntryComplete {
+                senses: vec![tarkka::Sense {
+                    pos: pos.to_string(),
+                    glosses: vec![tarkka::Gloss {
+                        shared_prefix_count: 0,
+                        new_categories: vec![],
+                        gloss: gloss.to_string(),
+                    }],
                 }],
-                form_of: vec![],
-            }],
-            hyphenations: vec![],
-            sounds: vec![],
-        }
+            },
+            vec![],
+            vec![],
+        )
     }
 
     #[test]
     fn test_build_tagged_index() {
         let test_words = vec![
-            (
-                "dictate".to_string(),
-                create_test_word("dictate", "verb", "to say words aloud"),
-                true,
-            ),
-            (
-                "dictionary".to_string(),
-                create_test_word("dictionary", "noun", "a book of word definitions"),
-                true,
-            ),
-            (
-                "dictionary".to_string(),
-                create_test_word("dictionary", "noun", "a reference book"),
-                false,
-            ),
-            (
-                "dictoto".to_string(),
-                create_test_word("dictoto", "noun", "fictional word for testing"),
-                true,
-            ),
-            (
-                "pa".to_string(),
-                create_test_word("pa", "noun", "short word"),
-                false,
-            ),
-            (
-                "papa".to_string(),
-                create_test_word("papa", "noun", "father"),
-                true,
-            ),
-            (
-                "papo".to_string(),
-                create_test_word("papo", "noun", "chat"),
-                true,
-            ),
-            (
-                "potato".to_string(),
-                create_test_word("potato", "noun", "a vegetable"),
-                false,
-            ),
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictate", "verb", "to say words aloud");
+                ("dictate".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictionary", "noun", "a book of word definitions");
+                ("dictionary".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictionary", "noun", "a reference book");
+                ("dictionary".to_string(), entry, sounds, hyphenations, false)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictoto", "noun", "fictional word for testing");
+                ("dictoto".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) = create_test_word("pa", "noun", "short word");
+                ("pa".to_string(), entry, sounds, hyphenations, false)
+            },
+            {
+                let (entry, sounds, hyphenations) = create_test_word("papa", "noun", "father");
+                ("papa".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) = create_test_word("papo", "noun", "chat");
+                ("papo".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("potato", "noun", "a vegetable");
+                ("potato".to_string(), entry, sounds, hyphenations, false)
+            },
         ];
 
         let result = build_tagged_index(test_words);
@@ -530,46 +599,43 @@ mod tests {
     #[test]
     fn test_tagged_write_read_roundtrip() {
         let test_words = vec![
-            (
-                "dictate".to_string(),
-                create_test_word("dictate", "verb", "to say words aloud"),
-                true,
-            ),
-            (
-                "dictionary".to_string(),
-                create_test_word("dictionary", "noun", "a book of word definitions"),
-                true,
-            ),
-            (
-                "dictionary".to_string(),
-                create_test_word("dictionary", "noun", "reference book"),
-                false,
-            ),
-            (
-                "dictoto".to_string(),
-                create_test_word("dictoto", "noun", "fictional word for testing"),
-                true,
-            ),
-            (
-                "pa".to_string(),
-                create_test_word("pa", "noun", "short word"),
-                false,
-            ),
-            (
-                "papa".to_string(),
-                create_test_word("papa", "noun", "father"),
-                true,
-            ),
-            (
-                "papo".to_string(),
-                create_test_word("papo", "noun", "chat"),
-                true,
-            ),
-            (
-                "potato".to_string(),
-                create_test_word("potato", "noun", "a vegetable"),
-                false,
-            ),
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictate", "verb", "to say words aloud");
+                ("dictate".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictionary", "noun", "a book of word definitions");
+                ("dictionary".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictionary", "noun", "reference book");
+                ("dictionary".to_string(), entry, sounds, hyphenations, false)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("dictoto", "noun", "fictional word for testing");
+                ("dictoto".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) = create_test_word("pa", "noun", "short word");
+                ("pa".to_string(), entry, sounds, hyphenations, false)
+            },
+            {
+                let (entry, sounds, hyphenations) = create_test_word("papa", "noun", "father");
+                ("papa".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) = create_test_word("papo", "noun", "chat");
+                ("papo".to_string(), entry, sounds, hyphenations, true)
+            },
+            {
+                let (entry, sounds, hyphenations) =
+                    create_test_word("potato", "noun", "a vegetable");
+                ("potato".to_string(), entry, sounds, hyphenations, false)
+            },
         ];
 
         let tagged_words = build_tagged_index(test_words);
@@ -617,7 +683,6 @@ mod tests {
                         new_categories: vec![],
                         gloss: "first noun definition".to_string(),
                     }],
-                    form_of: vec![],
                 },
                 tarkka::Sense {
                     pos: "adj".to_string(),
@@ -626,7 +691,6 @@ mod tests {
                         new_categories: vec![],
                         gloss: "adjective definition".to_string(),
                     }],
-                    form_of: vec![],
                 },
                 tarkka::Sense {
                     pos: "noun".to_string(),
@@ -635,11 +699,8 @@ mod tests {
                         new_categories: vec![],
                         gloss: "second noun definition".to_string(),
                     }],
-                    form_of: vec![],
                 },
             ],
-            hyphenations: vec![],
-            sounds: vec![],
         };
 
         merge_same_pos_senses(&mut entry.senses);

@@ -11,8 +11,6 @@ pub const HEADER_SIZE: u8 = 16;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WordEntryComplete {
     pub senses: Vec<Sense>,
-    pub hyphenations: Vec<Hyphenation>,
-    pub sounds: Vec<Sound>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -25,18 +23,7 @@ pub struct Gloss {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Sense {
     pub pos: String,
-    pub form_of: Vec<FormOf>,
     pub glosses: Vec<Gloss>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FormOf {
-    pub word: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Sound {
-    pub ipa: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -56,6 +43,8 @@ pub struct WordWithTaggedEntries {
     pub word: String,
     pub tag: WordTag,
     pub entries: Vec<WordEntryComplete>,
+    pub sounds: Option<String>,
+    pub hyphenations: Option<Hyphenation>,
 }
 
 impl WordWithTaggedEntries {
@@ -87,6 +76,24 @@ impl WordWithTaggedEntries {
             v.extend_from_slice(&(size as u16).to_le_bytes());
             v.extend_from_slice(&serialized);
         }
+
+        // Serialize sounds (optional)
+        let sounds_data = if let Some(ref sound_str) = self.sounds {
+            sound_str.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
+        v.extend_from_slice(&(sounds_data.len() as u16).to_le_bytes());
+        v.extend_from_slice(&sounds_data);
+
+        // Serialize hyphenations (optional)
+        let hyphenations_data = if let Some(ref hyphenation) = self.hyphenations {
+            serde_json::to_vec(hyphenation).unwrap()
+        } else {
+            Vec::new()
+        };
+        v.extend_from_slice(&(hyphenations_data.len() as u16).to_le_bytes());
+        v.extend_from_slice(&hyphenations_data);
 
         v
     }
@@ -130,6 +137,56 @@ impl WordWithTaggedEntries {
             entries.push(entry);
         }
 
-        Ok(WordWithTaggedEntries { word, tag, entries })
+        // Deserialize sounds (optional)
+        let sounds = if pos + 2 <= data.len() {
+            let sounds_size = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+
+            if sounds_size == 0 {
+                None
+            } else {
+                if pos + sounds_size > data.len() {
+                    return Err("Not enough data for sounds");
+                }
+                let sounds_data = &data[pos..pos + sounds_size];
+                pos += sounds_size;
+
+                let sound_str = String::from_utf8(sounds_data.to_vec())
+                    .map_err(|_| "Failed to deserialize sounds as UTF-8")?;
+                Some(sound_str)
+            }
+        } else {
+            None
+        };
+
+        // Deserialize hyphenations (optional)
+        let hyphenations = if pos + 2 <= data.len() {
+            let hyphenations_size = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+
+            if hyphenations_size == 0 {
+                None
+            } else {
+                if pos + hyphenations_size > data.len() {
+                    return Err("Not enough data for hyphenations");
+                }
+                let hyphenations_data = &data[pos..pos + hyphenations_size];
+                pos += hyphenations_size;
+
+                let hyphenation: Hyphenation = serde_json::from_slice(hyphenations_data)
+                    .map_err(|_| "Failed to deserialize hyphenations")?;
+                Some(hyphenation)
+            }
+        } else {
+            None
+        };
+
+        Ok(WordWithTaggedEntries {
+            word,
+            tag,
+            entries,
+            sounds,
+            hyphenations,
+        })
     }
 }

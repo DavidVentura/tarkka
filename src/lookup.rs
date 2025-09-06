@@ -46,26 +46,19 @@ fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_pre
 }
 
 fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
-    // Collect all IPA pronunciations and hyphenations from all entries
-    let mut all_ipa = Vec::new();
-    let mut all_hyphenations = Vec::new();
+    // Get IPA pronunciation and hyphenation from word level
+    let mut all_ipa: Vec<String> = Vec::new();
+    let mut all_hyphenations: Vec<String> = Vec::new();
 
-    for entry in &w.entries {
-        for sound in &entry.sounds {
-            if let Some(ipa) = &sound.ipa {
-                if !all_ipa.contains(ipa) {
-                    all_ipa.push(ipa.clone());
-                }
-            }
-        }
-
-        for hyphenation in &entry.hyphenations {
-            let hyph_str = hyphenation.parts.join("-");
-            if !all_hyphenations.contains(&hyph_str) {
-                all_hyphenations.push(hyph_str);
-            }
-        }
+    if let Some(sound_str) = &w.sounds {
+        all_ipa.push(sound_str.clone());
     }
+
+    let hyph_str = if let Some(hyphenation) = &w.hyphenations {
+        hyphenation.parts.join("-")
+    } else {
+        "".to_string()
+    };
 
     // Display word with pronunciation and hyphenation
     let ipa_str = if all_ipa.is_empty() {
@@ -73,16 +66,11 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
     } else {
         all_ipa.join(", ")
     };
-    let hyph_str = if all_hyphenations.is_empty() {
-        "".to_string()
-    } else {
-        all_hyphenations.join(", ")
-    };
 
     println!("{wn} - {} - {}", ipa_str, hyph_str);
 
     // Display entries based on tag
-    println!("{w:#?}");
+    // println!("{w:#?}");
     match w.tag {
         WordTag::Monolingual => {
             // All entries are monolingual

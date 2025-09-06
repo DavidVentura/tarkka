@@ -1,4 +1,9 @@
-use crate::{FormOf, Gloss, Hyphenation, Sense, Sound, WordEntryComplete};
+use crate::{Gloss, Hyphenation, Sense, WordEntryComplete};
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Sound {
+    pub ipa: Option<String>,
+}
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -22,13 +27,11 @@ pub struct KaikkiWordEntry {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KaikkiSense {
     #[serde(default)]
-    pub form_of: Vec<FormOf>,
-    #[serde(default)]
     pub glosses: Vec<String>,
 }
 
 impl KaikkiWordEntry {
-    pub fn to_word_entry_complete(self) -> WordEntryComplete {
+    pub fn to_word_entry_complete(self) -> (WordEntryComplete, Vec<Sound>, Vec<Hyphenation>) {
         let pos = self.pos.unwrap_or_else(|| "unknown".to_string());
         let senses = self
             .senses
@@ -56,16 +59,11 @@ impl KaikkiWordEntry {
                 };
                 Sense {
                     pos: pos.clone(),
-                    form_of: kaikki_sense.form_of,
                     glosses,
                 }
             })
             .collect();
 
-        WordEntryComplete {
-            senses,
-            hyphenations: self.hyphenations,
-            sounds: self.sounds,
-        }
+        (WordEntryComplete { senses }, self.sounds, self.hyphenations)
     }
 }
