@@ -1,6 +1,6 @@
+use crate::{AggregatedWord, HEADER_SIZE};
 use std::io::Seek;
 use std::io::{Read, SeekFrom};
-use tarkka::{AggregatedWord, HEADER_SIZE};
 
 struct OffsetFile<R: Read + Seek> {
     reader: R,
@@ -43,10 +43,7 @@ pub struct DictionaryReader<'a, R: Read + Seek> {
 }
 
 impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
-    //pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
     pub fn open(mut r: R) -> Result<Self, Box<dyn std::error::Error>> {
-        //let mut file = File::open(path)?;
-
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;
         if &magic != b"DICT" {

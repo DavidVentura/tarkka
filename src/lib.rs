@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub mod reader;
+
+#[cfg(target_os = "android")]
+pub mod android;
+
 pub const HEADER_SIZE: u8 = 16;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -103,7 +108,8 @@ impl AggregatedWord {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Gloss {
-    pub category_path: Vec<String>,
+    pub shared_prefix_count: u8, // How many categories shared with previous gloss
+    pub new_categories: Vec<String>, // Only the new/different categories
     pub gloss: String,
 }
 
@@ -130,16 +136,41 @@ impl PosGlosses {
 }
 
 impl Gloss {
+    pub fn get_category_path(&self, previous_path: &[String]) -> Vec<String> {
+        let mut path = Vec::new();
+        if self.shared_prefix_count > 0 {
+            let prefix_len = (self.shared_prefix_count as usize).min(previous_path.len());
+            path.extend_from_slice(&previous_path[..prefix_len]);
+        }
+        path.extend(self.new_categories.clone());
+        path
+    }
+
     fn serialize(&self) -> Vec<u8> {
         let mut v = Vec::new();
 
-        assert!(self.category_path.len() < 256, "too many categories: {:?}", self.category_path);
-        v.extend_from_slice(&[self.category_path.len() as u8]);
-        for category in &self.category_path {
+        // Pack shared_prefix_count and new_categories.len() into single byte (4 bits each)
+        assert!(
+            self.shared_prefix_count < 16,
+            "shared_prefix_count must be < 16, got {}",
+            self.shared_prefix_count
+        );
+        assert!(
+            self.new_categories.len() < 16,
+            "new_categories.len() must be < 16, got {}",
+            self.new_categories.len()
+        );
+
+        let packed_byte = (self.shared_prefix_count << 4) | (self.new_categories.len() as u8);
+        v.extend_from_slice(&[packed_byte]);
+
+        // Serialize new categories
+        for category in &self.new_categories {
             v.extend_from_slice(&u16_as_2b_leb128(category.len() as u16));
             v.extend_from_slice(category.as_bytes());
         }
 
+        // Serialize gloss
         v.extend_from_slice(&u16_as_2b_leb128(self.gloss.len() as u16));
         v.extend_from_slice(self.gloss.as_bytes());
         v
@@ -209,15 +240,21 @@ impl AggregatedWord {
             pos += 1;
 
             let mut glosses = Vec::with_capacity(glosses_count);
+            let mut last_category_path: Vec<String> = Vec::new();
+
             for _ in 0..glosses_count {
                 if pos >= data.len() {
-                    return Err("Not enough data for category path count");
+                    return Err("Not enough data for packed byte");
                 }
-                let category_path_count = data[pos] as usize;
+                let packed_byte = data[pos];
                 pos += 1;
 
-                let mut category_path = Vec::with_capacity(category_path_count);
-                for _ in 0..category_path_count {
+                // Unpack shared_prefix_count (upper 4 bits) and new_categories_count (lower 4 bits)
+                let shared_prefix_count = (packed_byte >> 4) as usize;
+                let new_categories_count = (packed_byte & 0x0F) as usize;
+
+                let mut new_categories = Vec::with_capacity(new_categories_count);
+                for _ in 0..new_categories_count {
                     let category_len = read_2b_leb128(data, &mut pos)? as usize;
                     if pos + category_len > data.len() {
                         return Err("Not enough data for category string");
@@ -225,7 +262,7 @@ impl AggregatedWord {
                     let category_string =
                         String::from_utf8_lossy(&data[pos..pos + category_len]).to_string();
                     pos += category_len;
-                    category_path.push(category_string);
+                    new_categories.push(category_string);
                 }
 
                 let gloss_len = read_2b_leb128(data, &mut pos)? as usize;
@@ -235,8 +272,22 @@ impl AggregatedWord {
                 let gloss = String::from_utf8_lossy(&data[pos..pos + gloss_len]).to_string();
                 pos += gloss_len;
 
+                // Reconstruct full category path for compatibility
+                let mut category_path = Vec::new();
+                if shared_prefix_count > 0 {
+                    if shared_prefix_count > last_category_path.len() {
+                        return Err("Shared prefix count exceeds previous category path length");
+                    }
+                    category_path.extend_from_slice(&last_category_path[..shared_prefix_count]);
+                }
+                category_path.extend(new_categories.clone());
+
+                // Update last category path for next iteration
+                last_category_path = category_path.clone();
+
                 glosses.push(Gloss {
-                    category_path,
+                    shared_prefix_count: shared_prefix_count as u8,
+                    new_categories,
                     gloss,
                 });
             }
@@ -342,3 +393,4 @@ impl AggregatedWord {
         })
     }
 }
+

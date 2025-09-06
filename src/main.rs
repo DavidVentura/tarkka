@@ -1,13 +1,13 @@
+use tarkka::{AggregatedWord, HEADER_SIZE, PosGlosses, WordEntry, WordEntryComplete};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::time::Instant;
-use tarkka::{AggregatedWord, HEADER_SIZE, PosGlosses, WordEntry, WordEntryComplete};
 
 pub mod reader;
 
 fn main() {
-    let lang = "zh";
+    let lang = "es";
     let good_words = match File::open(format!("filtered-{lang}-raw-wiktextract-data.jsonl")) {
         Ok(mut f) => {
             println!("parsing json from pre-filtered");
@@ -258,20 +258,26 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
             None
         };
 
-        let mut processed_glosses = Vec::new();
         let mut all_form_of = Vec::new();
 
+        // Create a temporary structure to hold category paths during processing
+        struct TempGloss {
+            category_path: Vec<String>,
+            gloss: String,
+        }
+
+        let mut temp_glosses = Vec::new();
         for sense in &word.senses {
             if let Some(glosses) = &sense.glosses {
                 if glosses.len() > 1 {
                     let category_path = glosses[0..glosses.len() - 1].to_vec();
                     let gloss = glosses[glosses.len() - 1].clone();
-                    processed_glosses.push(tarkka::Gloss {
+                    temp_glosses.push(TempGloss {
                         category_path,
                         gloss,
                     });
                 } else if glosses.len() == 1 {
-                    processed_glosses.push(tarkka::Gloss {
+                    temp_glosses.push(TempGloss {
                         category_path: vec![],
                         gloss: glosses[0].clone(),
                     });
@@ -287,7 +293,7 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
         let mut consolidated_glosses = Vec::new();
         let mut used_indices = std::collections::HashSet::new();
 
-        for (i, gloss) in processed_glosses.iter().enumerate() {
+        for (i, gloss) in temp_glosses.iter().enumerate() {
             if used_indices.contains(&i) {
                 continue;
             }
@@ -295,7 +301,7 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
             if gloss.category_path.is_empty() {
                 // Check if this gloss text appears as a category in other entries
                 let mut found_as_category = false;
-                for (j, other_gloss) in processed_glosses.iter().enumerate() {
+                for (j, other_gloss) in temp_glosses.iter().enumerate() {
                     if i != j
                         && !other_gloss.category_path.is_empty()
                         && other_gloss.category_path[0] == gloss.gloss
@@ -311,24 +317,30 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
                     used_indices.insert(i);
 
                     // Find all glosses that use this as a category and add them
-                    for (j, other_gloss) in processed_glosses.iter().enumerate() {
+                    for (j, other_gloss) in temp_glosses.iter().enumerate() {
                         if i != j
                             && !other_gloss.category_path.is_empty()
                             && other_gloss.category_path[0] == gloss.gloss
                         {
-                            consolidated_glosses.push(other_gloss.clone());
+                            consolidated_glosses.push(TempGloss {
+                                category_path: other_gloss.category_path.clone(),
+                                gloss: other_gloss.gloss.clone(),
+                            });
                             used_indices.insert(j);
                         }
                     }
                 } else {
                     // Keep as uncategorized
-                    consolidated_glosses.push(gloss.clone());
+                    consolidated_glosses.push(TempGloss {
+                        category_path: gloss.category_path.clone(),
+                        gloss: gloss.gloss.clone(),
+                    });
                     used_indices.insert(i);
                 }
             } else {
                 // Check if this category already has a standalone version
                 let mut has_standalone = false;
-                for (j, other_gloss) in processed_glosses.iter().enumerate() {
+                for (j, other_gloss) in temp_glosses.iter().enumerate() {
                     if i != j
                         && other_gloss.category_path.is_empty()
                         && other_gloss.gloss == gloss.category_path[0]
@@ -340,7 +352,10 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
 
                 if !has_standalone {
                     // Add this categorized gloss normally
-                    consolidated_glosses.push(gloss.clone());
+                    consolidated_glosses.push(TempGloss {
+                        category_path: gloss.category_path.clone(),
+                        gloss: gloss.gloss.clone(),
+                    });
                     used_indices.insert(i);
                 }
                 // If it has a standalone version, it will be handled above
@@ -349,7 +364,33 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
 
         // Do not sort consolidated_glosses; they are supposed to come in order
         // and there's _some amount_ of relevancy to the order in wiktionary
-        processed_glosses = consolidated_glosses;
+        // Convert to compressed format using prefix compression
+        let mut processed_glosses = Vec::new();
+        let mut last_category_path: Vec<String> = Vec::new();
+
+        for consolidated_gloss in consolidated_glosses {
+            // Find common prefix with previous gloss
+            let mut shared_count = 0;
+            while shared_count < last_category_path.len()
+                && shared_count < consolidated_gloss.category_path.len()
+                && last_category_path[shared_count]
+                    == consolidated_gloss.category_path[shared_count]
+            {
+                shared_count += 1;
+            }
+
+            // New categories are the ones after the shared prefix
+            let new_categories = consolidated_gloss.category_path[shared_count..].to_vec();
+
+            processed_glosses.push(tarkka::Gloss {
+                shared_prefix_count: shared_count as u8,
+                new_categories,
+                gloss: consolidated_gloss.gloss,
+            });
+
+            // Update last category path for next iteration
+            last_category_path = consolidated_gloss.category_path;
+        }
 
         let ipa_sound = if let Some(sounds) = &word.sounds {
             let ipa_strings: Vec<String> = sounds.iter().filter_map(|s| s.ipa.clone()).collect();
@@ -443,8 +484,8 @@ pub fn build_index(words: Vec<WordEntryComplete>) -> Vec<AggregatedWord> {
 mod tests {
     use super::*;
     use crate::reader::DictionaryReader;
+    use crate::{Sense, WordEntryComplete};
     use std::io::Cursor;
-    use tarkka::{Sense, WordEntryComplete};
 
     fn create_test_word(word: &str, pos: &str, gloss: &str) -> WordEntryComplete {
         WordEntryComplete {
@@ -571,8 +612,10 @@ mod tests {
         assert_eq!(word.pos_glosses[0].glosses.len(), 2);
 
         let first_gloss = &word.pos_glosses[0].glosses[0];
+        // First gloss should have no shared prefix and full category in new_categories
+        assert_eq!(first_gloss.shared_prefix_count, 0);
         assert_eq!(
-            first_gloss.category_path,
+            first_gloss.new_categories,
             vec!["A mammal of the family Canidae:"]
         );
         assert_eq!(
@@ -581,10 +624,9 @@ mod tests {
         );
 
         let second_gloss = &word.pos_glosses[0].glosses[1];
-        assert_eq!(
-            second_gloss.category_path,
-            vec!["A mammal of the family Canidae:"]
-        );
+        // Second gloss should share the category prefix with first gloss
+        assert_eq!(second_gloss.shared_prefix_count, 1); // Shares 1 category with previous
+        assert_eq!(second_gloss.new_categories, Vec::<String>::new()); // No new categories
         assert_eq!(
             second_gloss.gloss,
             "Any member of the family Canidae, including domestic dogs, wolves, coyotes."
@@ -640,43 +682,30 @@ mod tests {
         assert_eq!(word.word, "denmark");
         assert_eq!(word.pos_glosses[0].glosses.len(), 4);
 
-        // First two have single-level category
+        // Test prefix compression in hierarchical categories
+        let gloss0 = &word.pos_glosses[0].glosses[0];
+        assert_eq!(gloss0.shared_prefix_count, 0);
         assert_eq!(
-            word.pos_glosses[0].glosses[0].category_path,
+            gloss0.new_categories,
             vec!["A number of places in other countries:"]
         );
-        assert_eq!(
-            word.pos_glosses[0].glosses[0].gloss,
-            "town in Western Australia"
-        );
+        assert_eq!(gloss0.gloss, "town in Western Australia");
 
-        assert_eq!(
-            word.pos_glosses[0].glosses[1].category_path,
-            vec!["A number of places in other countries:"]
-        );
-        assert_eq!(
-            word.pos_glosses[0].glosses[1].gloss,
-            "community in Nova Scotia"
-        );
+        let gloss1 = &word.pos_glosses[0].glosses[1];
+        assert_eq!(gloss1.shared_prefix_count, 1); // Shares 1 category with gloss0
+        assert_eq!(gloss1.new_categories, Vec::<String>::new());
+        assert_eq!(gloss1.gloss, "community in Nova Scotia");
 
-        // Last two have nested categories
-        assert_eq!(
-            word.pos_glosses[0].glosses[2].category_path,
-            vec![
-                "A number of places in other countries:",
-                "{{place|en|place|c/USA}}:"
-            ]
-        );
-        assert_eq!(word.pos_glosses[0].glosses[2].gloss, "community in Georgia");
+        // Nested categories
+        let gloss2 = &word.pos_glosses[0].glosses[2];
+        assert_eq!(gloss2.shared_prefix_count, 1); // Shares 1 category with previous
+        assert_eq!(gloss2.new_categories, vec!["{{place|en|place|c/USA}}:"]);
+        assert_eq!(gloss2.gloss, "community in Georgia");
 
-        assert_eq!(
-            word.pos_glosses[0].glosses[3].category_path,
-            vec![
-                "A number of places in other countries:",
-                "{{place|en|place|c/USA}}:"
-            ]
-        );
-        assert_eq!(word.pos_glosses[0].glosses[3].gloss, "community in Indiana");
+        let gloss3 = &word.pos_glosses[0].glosses[3];
+        assert_eq!(gloss3.shared_prefix_count, 2); // Shares 2 categories with gloss2
+        assert_eq!(gloss3.new_categories, Vec::<String>::new());
+        assert_eq!(gloss3.gloss, "community in Indiana");
     }
 
     #[test]
@@ -726,32 +755,26 @@ mod tests {
         // - One categorized gloss (the standalone "A ruminant mammal..." was consolidated into the category)
         assert_eq!(word.pos_glosses[0].glosses.len(), 3);
 
-        // Verify the consolidation worked correctly:
+        // Verify the consolidation and compression worked correctly:
+        let gloss0 = &word.pos_glosses[0].glosses[0];
+        assert_eq!(gloss0.shared_prefix_count, 0);
         assert_eq!(
-            word.pos_glosses[0].glosses[0].category_path,
+            gloss0.new_categories,
             vec!["A ruminant mammal with hooves and often antlers, of the family Cervidae."]
         );
         assert_eq!(
-            word.pos_glosses[0].glosses[0].gloss,
+            gloss0.gloss,
             "One of the smaller animals of the family Cervidae."
         );
 
-        assert_eq!(
-            word.pos_glosses[0].glosses[1].category_path,
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            word.pos_glosses[0].glosses[1].gloss,
-            "The meat of such an animal; venison."
-        );
+        let gloss1 = &word.pos_glosses[0].glosses[1];
+        assert_eq!(gloss1.shared_prefix_count, 0); // No shared categories (uncategorized)
+        assert_eq!(gloss1.new_categories, Vec::<String>::new());
+        assert_eq!(gloss1.gloss, "The meat of such an animal; venison.");
 
-        assert_eq!(
-            word.pos_glosses[0].glosses[2].category_path,
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            word.pos_glosses[0].glosses[2].gloss,
-            "Any animal, especially a quadrupedal mammal."
-        );
+        let gloss2 = &word.pos_glosses[0].glosses[2];
+        assert_eq!(gloss2.shared_prefix_count, 0); // No shared categories (uncategorized)
+        assert_eq!(gloss2.new_categories, Vec::<String>::new());
+        assert_eq!(gloss2.gloss, "Any animal, especially a quadrupedal mammal.");
     }
 }
