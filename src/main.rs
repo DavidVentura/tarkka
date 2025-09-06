@@ -56,6 +56,7 @@ fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<(String, WordEntryComple
 }
 
 fn main() {
+    /*
     let word_lang = "es";
     let good_words1 = lang_words(word_lang, "es");
     let mut good_words2 = lang_words(word_lang, "en");
@@ -63,10 +64,9 @@ fn main() {
     let mut all_tagged_entries = good_words1;
     all_tagged_entries.append(&mut good_words2);
 
-    /*
+    */
     let word_lang = "en";
     let all_tagged_entries = lang_words(word_lang, "en");
-    */
 
     let s = Instant::now();
     let words = build_tagged_index(all_tagged_entries);
@@ -263,7 +263,8 @@ fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
 
     if entries.len() == 1 {
         let mut entry = entries.into_iter().next().unwrap();
-        // Still need to compress categories even for single entry
+        // Still need to compress categories and merge senses even for single entry
+        merge_same_pos_senses(&mut entry.senses);
         compress_categories(&mut entry.senses);
         return entry;
     }
@@ -297,22 +298,57 @@ fn aggregate_entries(entries: Vec<WordEntryComplete>) -> WordEntryComplete {
         }
     }
 
-    // Compress categories after aggregation
+    // Merge senses with the same POS and compress categories after aggregation
+    merge_same_pos_senses(&mut base.senses);
     compress_categories(&mut base.senses);
 
     base
 }
 
-fn compress_categories(senses: &mut Vec<tarkka::Sense>) {
-    let mut last_category_path: Vec<String> = Vec::new();
+fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
+    use std::collections::HashMap;
 
+    let mut pos_to_sense: HashMap<String, tarkka::Sense> = HashMap::new();
+
+    for sense in senses.drain(..) {
+        match pos_to_sense.get_mut(&sense.pos) {
+            Some(existing_sense) => {
+                // Merge glosses
+                existing_sense.glosses.extend(sense.glosses);
+
+                // Merge form_of
+                for form_of in sense.form_of {
+                    if !existing_sense
+                        .form_of
+                        .iter()
+                        .any(|f| f.word == form_of.word)
+                    {
+                        existing_sense.form_of.push(form_of);
+                    }
+                }
+            }
+            None => {
+                pos_to_sense.insert(sense.pos.clone(), sense);
+            }
+        }
+    }
+
+    // Convert back to Vec and sort by POS for consistent ordering
+    let mut merged_senses: Vec<tarkka::Sense> = pos_to_sense.into_values().collect();
+    merged_senses.sort_by(|a, b| a.pos.cmp(&b.pos));
+    *senses = merged_senses;
+}
+
+fn compress_categories(senses: &mut Vec<tarkka::Sense>) {
     for sense in senses {
+        let mut last_category_path: Vec<String> = Vec::new();
+
         for gloss in sense.glosses.iter_mut() {
             if !gloss.new_categories.is_empty() {
                 // Current full category path is the new categories for this gloss
                 let current_category_path = gloss.new_categories.clone();
 
-                // Find common prefix with previous category path
+                // Find common prefix with previous category path within this sense
                 let mut shared_count = 0;
                 while shared_count < last_category_path.len()
                     && shared_count < current_category_path.len()
@@ -329,7 +365,7 @@ fn compress_categories(senses: &mut Vec<tarkka::Sense>) {
                     vec![]
                 };
 
-                // Update last category path for next iteration
+                // Update last category path for next iteration within this sense
                 last_category_path = current_category_path;
             } else {
                 // No categories, reset the path
@@ -402,15 +438,15 @@ mod tests {
         WordEntryComplete {
             senses: vec![tarkka::Sense {
                 pos: pos.to_string(),
-                glosses: Some(vec![tarkka::Gloss {
+                glosses: vec![tarkka::Gloss {
                     shared_prefix_count: 0,
-                    new_categories: None,
+                    new_categories: vec![],
                     gloss: gloss.to_string(),
-                }]),
-                form_of: None,
+                }],
+                form_of: vec![],
             }],
-            hyphenations: None,
-            sounds: None,
+            hyphenations: vec![],
+            sounds: vec![],
         }
     }
 
@@ -552,14 +588,11 @@ mod tests {
         assert_eq!(word.entries.len(), 2); // Exactly 2 entries for Both tag
         assert_eq!(word.entries[0].senses[0].pos, "noun"); // First entry is monolingual
         assert_eq!(
-            word.entries[0].senses[0].glosses.as_ref().unwrap()[0].gloss,
+            word.entries[0].senses[0].glosses[0].gloss,
             "a book of word definitions"
         );
         assert_eq!(word.entries[1].senses[0].pos, "noun"); // Second entry is English
-        assert_eq!(
-            word.entries[1].senses[0].glosses.as_ref().unwrap()[0].gloss,
-            "reference book"
-        );
+        assert_eq!(word.entries[1].senses[0].glosses[0].gloss, "reference book");
 
         let result = dict_reader.lookup("papa").unwrap();
         assert!(result.is_some());
@@ -571,5 +604,54 @@ mod tests {
 
         let result = dict_reader.lookup("nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_same_pos_senses() {
+        let mut entry = WordEntryComplete {
+            senses: vec![
+                tarkka::Sense {
+                    pos: "noun".to_string(),
+                    glosses: vec![tarkka::Gloss {
+                        shared_prefix_count: 0,
+                        new_categories: vec![],
+                        gloss: "first noun definition".to_string(),
+                    }],
+                    form_of: vec![],
+                },
+                tarkka::Sense {
+                    pos: "adj".to_string(),
+                    glosses: vec![tarkka::Gloss {
+                        shared_prefix_count: 0,
+                        new_categories: vec![],
+                        gloss: "adjective definition".to_string(),
+                    }],
+                    form_of: vec![],
+                },
+                tarkka::Sense {
+                    pos: "noun".to_string(),
+                    glosses: vec![tarkka::Gloss {
+                        shared_prefix_count: 0,
+                        new_categories: vec![],
+                        gloss: "second noun definition".to_string(),
+                    }],
+                    form_of: vec![],
+                },
+            ],
+            hyphenations: vec![],
+            sounds: vec![],
+        };
+
+        merge_same_pos_senses(&mut entry.senses);
+
+        // Should now have only 2 senses: 1 adj and 1 noun (with 2 glosses)
+        assert_eq!(entry.senses.len(), 2);
+
+        // Find the noun sense (should be first due to sorting)
+        let noun_sense = entry.senses.iter().find(|s| s.pos == "noun").unwrap();
+        assert_eq!(noun_sense.glosses.len(), 2);
+
+        let adj_sense = entry.senses.iter().find(|s| s.pos == "adj").unwrap();
+        assert_eq!(adj_sense.glosses.len(), 1);
     }
 }
