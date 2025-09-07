@@ -1,4 +1,4 @@
-use crate::{Gloss, Hyphenation, Sense, WordEntryComplete};
+use crate::{Gloss, Sense, WordEntryComplete};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Sound {
@@ -13,7 +13,11 @@ pub struct WordEntry {
     pub word: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Hyphenation {
+    pub parts: Vec<String>,
+}
+#[derive(Debug, Clone, Deserialize)]
 pub struct KaikkiWordEntry {
     pub pos: Option<String>,
     pub word: String,

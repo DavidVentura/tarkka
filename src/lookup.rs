@@ -48,17 +48,12 @@ fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_pre
 fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
     // Get IPA pronunciation and hyphenation from word level
     let mut all_ipa: Vec<String> = Vec::new();
-    let mut all_hyphenations: Vec<String> = Vec::new();
 
     if let Some(sound_str) = &w.sounds {
         all_ipa.push(sound_str.clone());
     }
 
-    let hyph_str = if let Some(hyphenation) = &w.hyphenations {
-        hyphenation.parts.join("-")
-    } else {
-        "".to_string()
-    };
+    let hyph_str = &w.hyphenations.join("-");
 
     // Display word with pronunciation and hyphenation
     let ipa_str = if all_ipa.is_empty() {
@@ -114,7 +109,7 @@ fn main() {
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
     let lookup = "perro";
-    let lookup = "Denmark";
+    let lookup = "zorro";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {

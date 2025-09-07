@@ -1,103 +1,59 @@
-use serde::{Deserialize, Serialize};
-
 pub mod kaikki;
 pub mod reader;
+pub mod ser;
+//pub mod test_enum;
+//pub mod test_ser;
+use ser::CompactSerialize;
 
 #[cfg(target_os = "android")]
 pub mod android;
 
 pub const HEADER_SIZE: u8 = 16;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, CompactSerialize)]
 pub struct WordEntryComplete {
+    #[max_len_cat(OneByte)]
     pub senses: Vec<Sense>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, CompactSerialize)]
 pub struct Gloss {
     pub shared_prefix_count: u8,
+    #[max_len_cat(OneByte)]
     pub new_categories: Vec<String>,
+    #[max_len_cat(TwoBytesVar)]
     pub gloss: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, CompactSerialize)]
 pub struct Sense {
+    #[max_len_cat(OneByte)]
     pub pos: String,
+    #[max_len_cat(OneByte)]
     pub glosses: Vec<Gloss>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Hyphenation {
-    pub parts: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, CompactSerialize)]
+#[repr(u8)]
 pub enum WordTag {
     Monolingual = 1,
     English = 2,
     Both = 3,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, CompactSerialize)]
 pub struct WordWithTaggedEntries {
-    pub word: String,
     pub tag: WordTag,
+    #[max_len_cat(OneByte)]
+    pub word: String,
+    #[max_len_cat(OneByte)]
     pub entries: Vec<WordEntryComplete>,
     pub sounds: Option<String>,
-    pub hyphenations: Option<Hyphenation>,
+    #[max_len_cat(OneByte)]
+    pub hyphenations: Vec<String>,
 }
 
 impl WordWithTaggedEntries {
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut v = Vec::new();
-
-        // Serialize tag (1 byte)
-        v.push(self.tag as u8);
-
-        // Serialize number of entries (1 byte)
-        assert!(
-            self.entries.len() < 256,
-            "Too many entries for word: {}",
-            self.word
-        );
-        v.push(self.entries.len() as u8);
-        assert!(self.entries.len() <= 2);
-
-        // Serialize each entry
-        for entry in &self.entries {
-            let serialized = serde_json::to_vec(entry).unwrap();
-            // Store entry size as u16
-            let size = serialized.len();
-            assert!(
-                size <= u16::MAX as usize,
-                "Entry too large for word: {}",
-                self.word
-            );
-            v.extend_from_slice(&(size as u16).to_le_bytes());
-            v.extend_from_slice(&serialized);
-        }
-
-        // Serialize sounds (optional)
-        let sounds_data = if let Some(ref sound_str) = self.sounds {
-            sound_str.as_bytes().to_vec()
-        } else {
-            Vec::new()
-        };
-        v.extend_from_slice(&(sounds_data.len() as u16).to_le_bytes());
-        v.extend_from_slice(&sounds_data);
-
-        // Serialize hyphenations (optional)
-        let hyphenations_data = if let Some(ref hyphenation) = self.hyphenations {
-            serde_json::to_vec(hyphenation).unwrap()
-        } else {
-            Vec::new()
-        };
-        v.extend_from_slice(&(hyphenations_data.len() as u16).to_le_bytes());
-        v.extend_from_slice(&hyphenations_data);
-
-        v
-    }
-
     pub fn deserialize(data: &[u8], word: String) -> Result<Self, &'static str> {
         let mut pos = 0;
 
@@ -132,9 +88,10 @@ impl WordWithTaggedEntries {
             let entry_data = &data[pos..pos + entry_size];
             pos += entry_size;
 
-            let entry: WordEntryComplete =
-                serde_json::from_slice(entry_data).map_err(|_| "Failed to deserialize entry")?;
-            entries.push(entry);
+            todo!();
+            //let entry: WordEntryComplete =
+            //    serde_json::from_slice(entry_data).map_err(|_| "Failed to deserialize entry")?;
+            //entries.push(entry);
         }
 
         // Deserialize sounds (optional)
@@ -173,7 +130,7 @@ impl WordWithTaggedEntries {
                 let hyphenations_data = &data[pos..pos + hyphenations_size];
                 pos += hyphenations_size;
 
-                let hyphenation: Hyphenation = serde_json::from_slice(hyphenations_data)
+                let hyphenation: kaikki::Hyphenation = serde_json::from_slice(hyphenations_data)
                     .map_err(|_| "Failed to deserialize hyphenations")?;
                 Some(hyphenation)
             }
@@ -186,7 +143,11 @@ impl WordWithTaggedEntries {
             tag,
             entries,
             sounds,
-            hyphenations,
+            hyphenations: if let Some(h) = hyphenations {
+                h.parts
+            } else {
+                vec![]
+            },
         })
     }
 }

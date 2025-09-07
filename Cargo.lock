@@ -216,7 +216,17 @@ dependencies = [
  "jni",
  "serde",
  "serde_json",
+ "tarkka_derive",
  "zeekstd",
+]
+
+[[package]]
+name = "tarkka_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

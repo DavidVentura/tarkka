@@ -6,6 +6,8 @@ use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
 use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
 
 pub mod reader;
+pub mod ser;
+use tarkka::ser::CompactSerialize;
 
 fn lang_words(
     word_lang: &str,
@@ -14,7 +16,7 @@ fn lang_words(
     String,
     WordEntryComplete,
     Vec<tarkka::kaikki::Sound>,
-    Vec<tarkka::Hyphenation>,
+    Vec<tarkka::kaikki::Hyphenation>,
     bool,
 )> {
     let good_words = match File::open(format!(
@@ -30,7 +32,7 @@ fn lang_words(
                 String,
                 WordEntryComplete,
                 Vec<tarkka::kaikki::Sound>,
-                Vec<tarkka::Hyphenation>,
+                Vec<tarkka::kaikki::Hyphenation>,
             )> = kaikki_words
                 .into_iter()
                 .map(|(s, kw)| {
@@ -60,8 +62,9 @@ fn lang_words(
                     "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
                 ))
                 .unwrap();
-                let ser = serde_json::to_string_pretty(&good_words).unwrap();
-                f.write_all(ser.as_bytes()).unwrap();
+                //let ser = serde_json::to_string_pretty(&good_words).unwrap();
+                //f.write_all(ser.as_bytes()).unwrap();
+                //TODO
             }
             println!("serialize took {:?}", s.elapsed());
             let is_monolingual = word_lang == gloss_lang;
@@ -85,8 +88,8 @@ fn main() {
     println!("entries ES {} EN {}", good_words1.len(), good_words2.len());
     let mut all_tagged_entries = good_words1;
     all_tagged_entries.append(&mut good_words2);
-
     */
+
     /*
     let word_lang = "en";
     let all_tagged_entries = lang_words(word_lang, "en");
@@ -156,8 +159,11 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
                 word.word
             );
 
-            let serialized = word.serialize();
-            let ser_size = serialized.len();
+            let ser_size = word.serialize(&mut all_serialized).unwrap();
+            if all_serialized.len() == ser_size {
+                println!("{:#?}", word);
+                println!("{:?}", all_serialized);
+            }
             assert!(ser_size <= u16::MAX as usize);
             let ser_size_b = (ser_size as u16).to_le_bytes();
 
@@ -166,10 +172,8 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             encoder.write(suffix).unwrap();
             encoder.write(&ser_size_b).unwrap();
 
-            let fixed_ovh = 1 + 1 + ser_size_b.len();
-            debug_assert!(fixed_ovh <= 4);
+            let fixed_ovh = 4;
             let entry_size = suffix.len() + fixed_ovh;
-            all_serialized.extend_from_slice(&serialized);
             global_binary_offset += ser_size as u32;
             l2_raw_size += entry_size as u32;
 
@@ -179,10 +183,16 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
         level1_data.extend(l1_group);
         level1_data.extend(l2_raw_size.to_le_bytes());
         level1_data.extend(group_binary_start.to_le_bytes());
+        assert!(level1_data.len() % 11 == 0);
+        // each entry == 11 bytes, assert this in a better way
+        // l1_group == 3
+        // l2_raw_size == 4 bytes
+        // group_binary_start == 4 bytes
 
         level2_size += l2_raw_size as u32;
     }
     println!("saved {shared_prefixes}b with prefix thing");
+    println!("serialized size = {}b", all_serialized.len());
     println!("compressed {:?}", s.elapsed());
 
     let mut total_ser_size = 0u32;
@@ -286,13 +296,13 @@ fn aggregate_entries(
     entries: Vec<(
         WordEntryComplete,
         Vec<tarkka::kaikki::Sound>,
-        Vec<tarkka::Hyphenation>,
+        Vec<tarkka::kaikki::Hyphenation>,
     )>,
     _is_monolingual_first: bool,
 ) -> (
     WordEntryComplete,
     Option<String>,
-    Option<tarkka::Hyphenation>,
+    Option<tarkka::kaikki::Hyphenation>,
 ) {
     if entries.is_empty() {
         panic!("Cannot aggregate empty entries");
@@ -409,7 +419,7 @@ pub fn build_tagged_index(
         String,
         WordEntryComplete,
         Vec<tarkka::kaikki::Sound>,
-        Vec<tarkka::Hyphenation>,
+        Vec<tarkka::kaikki::Hyphenation>,
         bool,
     )>,
 ) -> Vec<WordWithTaggedEntries> {
@@ -419,12 +429,12 @@ pub fn build_tagged_index(
             Vec<(
                 WordEntryComplete,
                 Vec<tarkka::kaikki::Sound>,
-                Vec<tarkka::Hyphenation>,
+                Vec<tarkka::kaikki::Hyphenation>,
             )>,
             Vec<(
                 WordEntryComplete,
                 Vec<tarkka::kaikki::Sound>,
-                Vec<tarkka::Hyphenation>,
+                Vec<tarkka::kaikki::Hyphenation>,
             )>,
         ),
     > = HashMap::new();
@@ -481,7 +491,11 @@ pub fn build_tagged_index(
                 tag,
                 entries,
                 sounds: selected_sound,
-                hyphenations: selected_hyphenation,
+                hyphenations: if let Some(h) = selected_hyphenation {
+                    h.parts
+                } else {
+                    vec![]
+                },
             }
         })
         .collect();
@@ -504,7 +518,7 @@ mod tests {
     ) -> (
         WordEntryComplete,
         Vec<tarkka::kaikki::Sound>,
-        Vec<tarkka::Hyphenation>,
+        Vec<tarkka::kaikki::Hyphenation>,
     ) {
         (
             WordEntryComplete {
