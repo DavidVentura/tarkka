@@ -5,7 +5,7 @@ use syn::{
     Attribute, Meta
 };
 
-#[proc_macro_derive(CompactSerialize, attributes(max_len_cat))]
+#[proc_macro_derive(CompactSerialize, attributes(max_len_cat, skip))]
 pub fn derive_compact_serialize(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -14,11 +14,16 @@ pub fn derive_compact_serialize(input: TokenStream) -> TokenStream {
         Data::Struct(data) => {
             match &data.fields {
                 Fields::Named(fields) => {
-                    let field_serializations = fields.named.iter().map(|field| {
+                    let field_serializations = fields.named.iter().filter_map(|field| {
                         let field_name = &field.ident;
                         let field_type = &field.ty;
                         
-                        if is_vec(field_type) {
+                        // Skip fields with #[skip] attribute
+                        if has_skip_attr(&field.attrs) {
+                            return None;
+                        }
+                        
+                        Some(if is_vec(field_type) {
                             let max_len = extract_max_len_attr(&field.attrs);
                             match max_len {
                                 Some(max_len_val) => {
@@ -34,7 +39,7 @@ pub fn derive_compact_serialize(input: TokenStream) -> TokenStream {
                             quote! {
                                 total_bytes += self.#field_name.serialize(out)?;
                             }
-                        }
+                        })
                     });
                     
                     quote! {
@@ -112,6 +117,15 @@ fn has_repr_u8(attrs: &[Attribute]) -> bool {
                     return true;
                 }
             }
+        }
+    }
+    false
+}
+
+fn has_skip_attr(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("skip") {
+            return true;
         }
     }
     false
