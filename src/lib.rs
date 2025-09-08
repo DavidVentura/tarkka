@@ -25,13 +25,8 @@ pub struct WordEntryComplete {
 
 #[derive(Debug, Clone, CompactDeserialize, CompactSerialize)]
 pub struct Gloss {
-    #[skip]
-    pub shared_prefix_count: u8,
-    //#[max_len_cat(OneByte)]
-    #[skip]
-    pub new_categories: Vec<String>,
-    #[max_len_cat(TwoBytesVar)]
-    pub gloss: String,
+    #[max_len_cat(OneByte)]
+    pub gloss_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, CompactDeserialize, CompactSerialize)]

@@ -40,31 +40,11 @@ impl KaikkiWordEntry {
         let senses = self
             .senses
             .into_iter()
-            .map(|kaikki_sense| {
-                let glosses = kaikki_sense.glosses;
-                let glosses = if glosses.is_empty() {
-                    vec![]
-                } else if glosses.len() == 1 {
-                    // Single gloss, no categories
-                    vec![Gloss {
-                        shared_prefix_count: 0,
-                        new_categories: vec![],
-                        gloss: glosses[0].clone(),
-                    }]
-                } else {
-                    // Multiple glosses: all but last are categories, last is the actual gloss
-                    let categories = glosses[..glosses.len() - 1].to_vec();
-                    let gloss_text = glosses[glosses.len() - 1].clone();
-                    vec![Gloss {
-                        shared_prefix_count: 0,
-                        new_categories: categories,
-                        gloss: gloss_text,
-                    }]
-                };
-                Sense {
-                    pos: pos.clone(),
-                    glosses,
-                }
+            .map(|kaikki_sense| Sense {
+                pos: pos.clone(),
+                glosses: vec![Gloss {
+                    gloss_lines: kaikki_sense.glosses,
+                }],
             })
             .collect();
 

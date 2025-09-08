@@ -1,4 +1,4 @@
-use std::{fs::File, time::Instant};
+use std::{fs::File, io::BufReader, time::Instant};
 
 use tarkka::{WordTag, WordWithTaggedEntries, reader::DictionaryReader};
 
@@ -12,6 +12,7 @@ fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_pre
         let mut current_category_path = Vec::new();
 
         // Add shared prefix from previous gloss
+        /*
         if gloss.shared_prefix_count > 0 {
             let prefix_len = (gloss.shared_prefix_count as usize).min(last_category_path.len());
             current_category_path.extend_from_slice(&last_category_path[..prefix_len]);
@@ -21,6 +22,7 @@ fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_pre
         if !gloss.new_categories.is_empty() {
             current_category_path.extend(gloss.new_categories.clone());
         }
+        */
 
         // Find how much of the category path has changed
         let mut common_len = 0;
@@ -39,7 +41,7 @@ fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_pre
 
         // Print the gloss with appropriate indentation
         let indent = "  ".repeat(current_category_path.len() + 1);
-        println!("{}• {}", indent, gloss.gloss);
+        println!("{}• {:?}", indent, gloss.gloss_lines);
 
         last_category_path = current_category_path;
     }
@@ -104,12 +106,21 @@ fn main() {
     let s = Instant::now();
     //let f = File::open("en-dictionary.dict").unwrap();
     let f = File::open("es-multi-dictionary.dict").unwrap();
+    let bf = BufReader::new(f);
     //let f = File::open("en-multi-dictionary.dict").unwrap();
-    let mut d = DictionaryReader::open(f).unwrap();
+    let mut d = DictionaryReader::open(bf).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
     //let lookup = "perro";
-    let lookup = "zorro";
+    let lookup = "arroz";
+    let r = d.lookup(lookup).unwrap();
+    println!("looked 1st up {:?}", s.elapsed());
+    if let Some(w) = r {
+        // println!("{w:#?}");
+        pretty_print(lookup, w);
+    } else {
+        println!("not found: '{lookup}'")
+    };
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {

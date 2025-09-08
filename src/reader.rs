@@ -1,3 +1,4 @@
+use crate::ser::VarUint;
 use crate::{HEADER_SIZE, WordWithTaggedEntries};
 use std::io::Seek;
 use std::io::{Read, SeekFrom};
@@ -191,10 +192,17 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             }
             word_buf.extend_from_slice(suffix_b);
 
-            // Read binary data size (2 bytes)
-            let size_bytes = &decompressed[pos..pos + 2];
-            let binary_size = u16::from_le_bytes([size_bytes[0], size_bytes[1]]);
-            pos += 2;
+            // Read binary data size VarUint
+            let maybe_size_bytes = &decompressed[pos..pos + 2];
+            pos += 1;
+            let first_byte = maybe_size_bytes[0];
+            let second_byte = maybe_size_bytes[1];
+            let binary_size = if (first_byte & 0x80) == 0x80 {
+                pos += 1;
+                ((first_byte & 0x7F) as u16) | ((second_byte as u16) << 7)
+            } else {
+                first_byte as u16
+            };
 
             if word_buf == wanted_word_b {
                 return Ok(Some((binary_offset, binary_size)));

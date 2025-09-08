@@ -7,7 +7,8 @@ use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
 
 pub mod reader;
 pub mod ser;
-use tarkka::ser::CompactSerialize;
+use tarkka::ser::{CompactSerialize, VarUint};
+use zeekstd::{EncodeOptions, FrameSizePolicy};
 
 fn lang_words(
     word_lang: &str,
@@ -134,12 +135,19 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
 
     let mut output = Vec::with_capacity(32 * 1024 * 1024);
     let mut all_serialized = Vec::with_capacity(32 * 1024 * 1024);
-    let mut encoder = zeekstd::Encoder::new(&mut output).unwrap();
+    let opts = EncodeOptions::new()
+        .checksum_flag(false)
+        .compression_level(9)
+        .frame_size_policy(FrameSizePolicy::Uncompressed(1024 * 1024));
+    let mut encoder = zeekstd::Encoder::with_opts(&mut output, opts).unwrap();
     let mut level2_size: u32 = 0;
 
     let mut shared_prefixes = 0;
     let mut global_binary_offset = 0u32;
 
+    let mut under_1b = 0;
+    let mut under_2b = 0;
+    let mut over_2b = 0;
     for (l1_group, words) in groups {
         let mut l2_raw_size = 0u32;
         let mut prev_word = "";
@@ -160,19 +168,29 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             );
 
             let ser_size = word.serialize(&mut all_serialized).unwrap();
-            if word.word == "zorro" {
-                println!("{:#?}", word);
-                //println!("{:?}", all_serialized);
-            }
             assert!(ser_size <= u16::MAX as usize);
-            let ser_size_b = (ser_size as u16).to_le_bytes();
+            let ss: VarUint = ser_size.into();
+            if ser_size < 127 {
+                under_1b += 1;
+            } else if ser_size < 32767 {
+                under_2b += 1;
+            } else {
+                over_2b += 1;
+            }
 
             encoder.write(&[shared_len as u8]).unwrap();
             encoder.write(&[suffix.len() as u8]).unwrap();
             encoder.write(suffix).unwrap();
-            encoder.write(&ser_size_b).unwrap();
+            //encoder.write(&[word.word.as_bytes().len() as u8]).unwrap();
+            //encoder.write(word.word.as_bytes()).unwrap();
+            //encoder.write(&ser_size_b).unwrap();
+            let vlen = ss.serialize(&mut encoder).unwrap();
 
-            let fixed_ovh = 4;
+            // if it was a per-word delta-offset
+            let fixed_ovh = 1;
+            let entry_size = word.word.as_bytes().len() + fixed_ovh + vlen;
+
+            let fixed_ovh = 2 + vlen;
             let entry_size = suffix.len() + fixed_ovh;
             global_binary_offset += ser_size as u32;
             l2_raw_size += entry_size as u32;
@@ -193,6 +211,7 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
 
         level2_size += l2_raw_size as u32;
     }
+    println!("ser size: under1 {under_1b} under2 {under_2b} over2 {over_2b}");
     println!("saved {shared_prefixes}b with prefix thing");
     println!("serialized size = {}b", all_serialized.len());
     println!("compressed {:?}", s.elapsed());
@@ -210,7 +229,9 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
     w.write_all(&total_ser_size.to_le_bytes()).unwrap();
     w.write_all(&level1_data).unwrap();
     w.write_all(&output).unwrap();
+    w.flush().unwrap();
 
+    // output = compressed, level2_size = raw
     let compressed_ser_sz = output.len() - level2_size as usize;
 
     println!("Created dictionary.dict with {} words", sorted_words.len());
@@ -335,7 +356,6 @@ fn aggregate_entries(
         let (mut entry, _, _) = entries.into_iter().next().unwrap();
         // Still need to compress categories and merge senses even for single entry
         merge_same_pos_senses(&mut entry.senses);
-        compress_categories(&mut entry.senses);
         return (entry, selected_sound, selected_hyphenation);
     }
 
@@ -351,7 +371,6 @@ fn aggregate_entries(
 
     // Merge senses with the same POS and compress categories after aggregation
     merge_same_pos_senses(&mut base.senses);
-    compress_categories(&mut base.senses);
 
     (base, selected_sound, selected_hyphenation)
 }
@@ -377,43 +396,6 @@ fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
     let mut merged_senses: Vec<tarkka::Sense> = pos_to_sense.into_values().collect();
     merged_senses.sort_by(|a, b| a.pos.cmp(&b.pos));
     *senses = merged_senses;
-}
-
-fn compress_categories(senses: &mut Vec<tarkka::Sense>) {
-    for sense in senses {
-        let mut last_category_path: Vec<String> = Vec::new();
-
-        for gloss in sense.glosses.iter_mut() {
-            if !gloss.new_categories.is_empty() {
-                // Current full category path is the new categories for this gloss
-                let current_category_path = gloss.new_categories.clone();
-
-                // Find common prefix with previous category path within this sense
-                let mut shared_count = 0;
-                while shared_count < last_category_path.len()
-                    && shared_count < current_category_path.len()
-                    && last_category_path[shared_count] == current_category_path[shared_count]
-                {
-                    shared_count += 1;
-                }
-
-                // Update the gloss with compression info
-                gloss.shared_prefix_count = shared_count as u8;
-                gloss.new_categories = if shared_count < current_category_path.len() {
-                    current_category_path[shared_count..].to_vec()
-                } else {
-                    vec![]
-                };
-
-                // Update last category path for next iteration within this sense
-                last_category_path = current_category_path;
-            } else {
-                // No categories, reset the path
-                gloss.shared_prefix_count = 0;
-                last_category_path.clear();
-            }
-        }
-    }
 }
 
 pub fn build_tagged_index(
@@ -527,9 +509,7 @@ mod tests {
                 senses: vec![tarkka::Sense {
                     pos: pos.to_string(),
                     glosses: vec![tarkka::Gloss {
-                        shared_prefix_count: 0,
-                        new_categories: vec![],
-                        gloss: gloss.to_string(),
+                        gloss_lines: vec![gloss.to_string()],
                     }],
                 }],
             },
@@ -695,25 +675,19 @@ mod tests {
                 tarkka::Sense {
                     pos: "noun".to_string(),
                     glosses: vec![tarkka::Gloss {
-                        shared_prefix_count: 0,
-                        new_categories: vec![],
-                        gloss: "first noun definition".to_string(),
+                        gloss_lines: vec!["first noun definition".to_string()],
                     }],
                 },
                 tarkka::Sense {
                     pos: "adj".to_string(),
                     glosses: vec![tarkka::Gloss {
-                        shared_prefix_count: 0,
-                        new_categories: vec![],
-                        gloss: "adjective definition".to_string(),
+                        gloss_lines: vec!["adjective definition".to_string()],
                     }],
                 },
                 tarkka::Sense {
                     pos: "noun".to_string(),
                     glosses: vec![tarkka::Gloss {
-                        shared_prefix_count: 0,
-                        new_categories: vec![],
-                        gloss: "second noun definition".to_string(),
+                        gloss_lines: vec!["second noun definition".to_string()],
                     }],
                 },
             ],
