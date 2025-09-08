@@ -80,6 +80,7 @@ impl<T: CompactSerialize> CompactSerializeWithMaxLen for &[T] {
 }
 
 impl CompactSerialize for String {
+    // TODO: this forces varint str
     fn serialize<W: Write>(&self, out: &mut W) -> Result<usize, SerializeError> {
         let vu: VarUint = self.len().into();
         vu.serialize(out)?;
@@ -94,7 +95,7 @@ impl CompactSerialize for Option<String> {
         if let Some(s) = self {
             return s.serialize(out);
         }
-        out.write_all(&[0]).unwrap();
+        out.write_all(&[0])?;
         Ok(1)
     }
 }
@@ -132,8 +133,9 @@ impl CompactSerialize for VarUint {
         // if first bit is 1; then we have two bytes; meaning that
         // if val >127 we need 2 bytes
         if self.0 > 127 {
-            let bytes = self.0.to_le_bytes();
-            out.write_all(&[bytes[0] | 0x80, bytes[1]])?;
+            let fb = (self.0 & 0x7F) as u8;
+            let sb = (self.0 >> 7) as u8;
+            out.write_all(&[fb | 0x80, sb])?;
         } else {
             out.write_all(&[self.0 as u8])?;
         };

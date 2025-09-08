@@ -81,21 +81,21 @@ fn lang_words(
 }
 
 fn main() {
-    /*
     let word_lang = "es";
     let good_words1 = lang_words(word_lang, "es");
     let mut good_words2 = lang_words(word_lang, "en");
     println!("entries ES {} EN {}", good_words1.len(), good_words2.len());
     let mut all_tagged_entries = good_words1;
     all_tagged_entries.append(&mut good_words2);
-    */
 
     /*
     let word_lang = "en";
     let all_tagged_entries = lang_words(word_lang, "en");
     */
+    /*
     let word_lang = "es";
     let all_tagged_entries = lang_words(word_lang, "es");
+    */
 
     let s = Instant::now();
     let words = build_tagged_index(all_tagged_entries);
@@ -160,9 +160,9 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             );
 
             let ser_size = word.serialize(&mut all_serialized).unwrap();
-            if all_serialized.len() == ser_size {
+            if word.word == "zorro" {
                 println!("{:#?}", word);
-                println!("{:?}", all_serialized);
+                //println!("{:?}", all_serialized);
             }
             assert!(ser_size <= u16::MAX as usize);
             let ser_size_b = (ser_size as u16).to_le_bytes();
@@ -180,6 +180,8 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             prev_word = current_word;
         }
 
+        // L1 size ~ 71KB (stays in memory, need to read entirely)
+        // L2 size 5~10MB (seek, useful to not store entire word ever)
         level1_data.extend(l1_group);
         level1_data.extend(l2_raw_size.to_le_bytes());
         level1_data.extend(group_binary_start.to_le_bytes());

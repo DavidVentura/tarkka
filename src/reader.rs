@@ -213,18 +213,22 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         size: u16,
         word: &str,
     ) -> Result<WordWithTaggedEntries, Box<dyn std::error::Error>> {
-        let mut decompressed = Vec::new();
         self.decoder.set_offset(offset as u64)?;
         self.decoder.set_offset_limit(offset as u64 + size as u64)?;
-        std::io::copy(&mut self.decoder, &mut decompressed)?;
 
-        let parsed = WordWithTaggedEntries::deserialize(&decompressed, word.to_string())
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::from(e) })?;
+        let mut decompressed = Vec::new();
+        std::io::copy(&mut self.decoder, &mut decompressed)?;
+        let parsed = WordWithTaggedEntries::named_deserialize(
+            &mut decompressed.as_slice(),
+            word.to_string(),
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::from(e) })?;
 
         Ok(parsed)
     }
 }
 
+/*
 fn reuse_vec<T, U>(mut v: Vec<T>) -> Vec<U> {
     const {
         assert!(size_of::<T>() == size_of::<U>());
@@ -233,3 +237,4 @@ fn reuse_vec<T, U>(mut v: Vec<T>) -> Vec<U> {
     v.clear();
     v.into_iter().map(|_| unreachable!()).collect()
 }
+*/

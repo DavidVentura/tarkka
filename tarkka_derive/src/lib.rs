@@ -130,3 +130,96 @@ fn has_skip_attr(attrs: &[Attribute]) -> bool {
     }
     false
 }
+
+#[proc_macro_derive(CompactDeserialize, attributes(max_len_cat, skip))]
+pub fn derive_compact_deserialize(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    
+    let deserialize_body = match &input.data {
+        Data::Struct(data) => {
+            match &data.fields {
+                Fields::Named(fields) => {
+                    let field_deserializations = fields.named.iter().filter_map(|field| {
+                        let field_name = &field.ident;
+                        let field_type = &field.ty;
+                        
+                        // Skip fields with #[skip] attribute
+                        if has_skip_attr(&field.attrs) {
+                            return Some(quote! {
+                                #field_name: Default::default(),
+                            });
+                        }
+                        
+                        Some(if is_vec(field_type) {
+                            let max_len = extract_max_len_attr(&field.attrs);
+                            match max_len {
+                                Some(max_len_val) => {
+                                    quote! {
+                                        #field_name: crate::de::CompactDeserializeWithMaxLen::deserialize(input, crate::de::MaxLen::#max_len_val)?,
+                                    }
+                                }
+                                None => {
+                                    panic!("String and Vec fields must have #[max_len_cat(...)] annotation");
+                                }
+                            }
+                        } else {
+                            quote! {
+                                #field_name: crate::de::CompactDeserialize::deserialize(input)?,
+                            }
+                        })
+                    });
+                    
+                    quote! {
+                        Ok(#name {
+                            #(#field_deserializations)*
+                        })
+                    }
+                }
+                _ => panic!("Only structs with named fields are supported"),
+            }
+        }
+        Data::Enum(data) => {
+            // Check for #[repr(u8)] attribute
+            if !has_repr_u8(&input.attrs) {
+                panic!("Enums must have #[repr(u8)] to derive CompactDeserialize");
+            }
+            
+            let variant_matches = data.variants.iter().map(|variant| {
+                let variant_name = &variant.ident;
+                // Extract discriminant value or use default ordering
+                let discriminant_value = if let Some((_, expr)) = &variant.discriminant {
+                    quote! { #expr }
+                } else {
+                    // For enums without explicit discriminants, we can't easily determine the value
+                    panic!("Enum variants must have explicit discriminant values for CompactDeserialize");
+                };
+                
+                quote! {
+                    #discriminant_value => Ok(Self::#variant_name),
+                }
+            });
+            
+            quote! {
+                use crate::de::CompactDeserialize;
+                let value = u8::deserialize(input)?;
+                match value {
+                    #(#variant_matches)*
+                    _ => Err(crate::de::DeserializeError::InvalidData("Invalid enum value")),
+                }
+            }
+        }
+        _ => panic!("Only structs and enums are supported"),
+    };
+    
+    let expanded = quote! {
+        impl crate::de::CompactDeserialize for #name {
+            fn deserialize<R: std::io::Read>(input: &mut R) -> Result<Self, crate::de::DeserializeError> {
+                use crate::de::CompactDeserializeWithMaxLen;
+                #deserialize_body
+            }
+        }
+    };
+    
+    TokenStream::from(expanded)
+}
