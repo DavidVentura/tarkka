@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
@@ -92,8 +93,6 @@ fn main() {
     /*
     let word_lang = "en";
     let all_tagged_entries = lang_words(word_lang, "en");
-    */
-    /*
     let word_lang = "es";
     let all_tagged_entries = lang_words(word_lang, "es");
     */
@@ -181,14 +180,7 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             encoder.write(&[shared_len as u8]).unwrap();
             encoder.write(&[suffix.len() as u8]).unwrap();
             encoder.write(suffix).unwrap();
-            //encoder.write(&[word.word.as_bytes().len() as u8]).unwrap();
-            //encoder.write(word.word.as_bytes()).unwrap();
-            //encoder.write(&ser_size_b).unwrap();
             let vlen = ss.serialize(&mut encoder).unwrap();
-
-            // if it was a per-word delta-offset
-            let fixed_ovh = 1;
-            let entry_size = word.word.as_bytes().len() + fixed_ovh + vlen;
 
             let fixed_ovh = 2 + vlen;
             let entry_size = suffix.len() + fixed_ovh;
@@ -278,7 +270,7 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<(String, Kaikki
         match word_entry.word {
             Some(w) => {
                 // special chinese comma
-                if w.contains("，") {
+                if w.contains(" ") || w.contains("，") {
                     // phrases, like 'animal doméstico' don't make sense
                     // in a WORD dictionary
                     continue;
@@ -385,6 +377,7 @@ fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
             Some(existing_sense) => {
                 // Merge glosses
                 existing_sense.glosses.extend(sense.glosses);
+                existing_sense.glosses = existing_sense.glosses.iter().cloned().unique().collect();
             }
             None => {
                 pos_to_sense.insert(sense.pos.clone(), sense);
@@ -650,11 +643,14 @@ mod tests {
         assert_eq!(word.entries.len(), 2); // Exactly 2 entries for Both tag
         assert_eq!(word.entries[0].senses[0].pos, "noun"); // First entry is monolingual
         assert_eq!(
-            word.entries[0].senses[0].glosses[0].gloss,
+            word.entries[0].senses[0].glosses[0].gloss_lines[0],
             "a book of word definitions"
         );
         assert_eq!(word.entries[1].senses[0].pos, "noun"); // Second entry is English
-        assert_eq!(word.entries[1].senses[0].glosses[0].gloss, "reference book");
+        assert_eq!(
+            word.entries[1].senses[0].glosses[0].gloss_lines[0],
+            "reference book"
+        );
 
         let result = dict_reader.lookup("papa").unwrap();
         assert!(result.is_some());

@@ -9,7 +9,7 @@ fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_pre
 
     for gloss in glosses {
         // Reconstruct full category path from compressed format
-        let mut current_category_path = Vec::new();
+        let current_category_path = Vec::new();
 
         // Add shared prefix from previous gloss
         /*
@@ -67,7 +67,7 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
     println!("{wn} - {} - {}", ipa_str, hyph_str);
 
     // Display entries based on tag
-    // println!("{w:#?}");
+    println!("{w:#?}");
     match w.tag {
         WordTag::Monolingual => {
             // All entries are monolingual
@@ -104,23 +104,14 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
 
 fn main() {
     let s = Instant::now();
-    //let f = File::open("en-dictionary.dict").unwrap();
+    //let f = File::open("en-multi-dictionary.dict").unwrap();
     let f = File::open("es-multi-dictionary.dict").unwrap();
     let bf = BufReader::new(f);
-    //let f = File::open("en-multi-dictionary.dict").unwrap();
     let mut d = DictionaryReader::open(bf).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
     //let lookup = "perro";
-    let lookup = "arroz";
-    let r = d.lookup(lookup).unwrap();
-    println!("looked 1st up {:?}", s.elapsed());
-    if let Some(w) = r {
-        // println!("{w:#?}");
-        pretty_print(lookup, w);
-    } else {
-        println!("not found: '{lookup}'")
-    };
+    let lookup = "Quinto";
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {

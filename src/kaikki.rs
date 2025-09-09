@@ -1,4 +1,5 @@
 use crate::{Gloss, Sense, WordEntryComplete};
+use itertools::Itertools;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Sound {
@@ -43,8 +44,17 @@ impl KaikkiWordEntry {
             .map(|kaikki_sense| Sense {
                 pos: pos.clone(),
                 glosses: vec![Gloss {
-                    gloss_lines: kaikki_sense.glosses,
-                }],
+                    gloss_lines: kaikki_sense
+                        .glosses
+                        .iter()
+                        .map(|s| s.as_str().trim().trim_end_matches(".").to_string())
+                        .unique()
+                        .collect(),
+                }]
+                .iter()
+                .cloned()
+                .unique()
+                .collect(),
             })
             .collect();
 

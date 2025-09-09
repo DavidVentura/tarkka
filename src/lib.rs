@@ -23,7 +23,7 @@ pub struct WordEntryComplete {
     pub senses: Vec<Sense>,
 }
 
-#[derive(Debug, Clone, CompactDeserialize, CompactSerialize)]
+#[derive(Debug, Clone, CompactDeserialize, CompactSerialize, Hash, PartialEq, Eq)]
 pub struct Gloss {
     #[max_len_cat(OneByte)]
     pub gloss_lines: Vec<String>,
