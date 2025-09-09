@@ -1,11 +1,29 @@
+use crate::WordWithTaggedEntries;
 use crate::reader::DictionaryReader;
-use crate::{WordWithTaggedEntries, WordTag};
+use std::ffi::CString;
 use std::fs::File;
 
 extern crate jni;
+use self::jni::JNIEnv;
 use self::jni::objects::{JClass, JObject, JString};
 use self::jni::sys::{jlong, jobject};
-use self::jni::JNIEnv;
+
+#[link(name = "log")]
+unsafe extern "C" {
+    fn __android_log_write(prio: i32, tag: *const i8, text: *const i8) -> i32;
+}
+
+const ANDROID_LOG_DEBUG: i32 = 3;
+
+macro_rules! android_log {
+    ($msg:expr) => {
+        unsafe {
+            let tag = CString::new("TarkkaNative").unwrap();
+            let message = CString::new($msg).unwrap();
+            __android_log_write(ANDROID_LOG_DEBUG, tag.as_ptr(), message.as_ptr());
+        }
+    };
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeOpen(
@@ -37,22 +55,52 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeLookup(
     reader_ptr: jlong,
     java_word: JString,
 ) -> jobject {
+    android_log!("nativeLookup: Started");
+
     if reader_ptr == 0 {
+        android_log!("nativeLookup: reader_ptr is 0, returning null");
         return std::ptr::null_mut();
     }
 
     let word: String = match env.get_string(&java_word) {
-        Ok(word) => word.into(),
-        Err(_) => return std::ptr::null_mut(),
+        Ok(word) => {
+            let w: String = word.into();
+            android_log!(format!("nativeLookup: Looking up word: {}", w));
+            w
+        }
+        Err(_) => {
+            android_log!("nativeLookup: Failed to get string from java_word");
+            return std::ptr::null_mut();
+        }
     };
 
+    android_log!("nativeLookup: Getting reader from pointer");
     let reader = unsafe { &mut *(reader_ptr as *mut DictionaryReader<File>) };
 
+    android_log!("nativeLookup: Calling reader.lookup");
     match reader.lookup(&word) {
-        Ok(Some(word_with_entries)) => unsafe {
-            create_word_with_tagged_entries_jobject(&mut env, &word_with_entries)
-        },
-        _ => std::ptr::null_mut(),
+        Ok(Some(word_with_entries)) => {
+            android_log!("nativeLookup: Found word, creating Java object");
+            unsafe {
+                let result = create_word_with_tagged_entries_jobject(&mut env, &word_with_entries);
+                if result.is_null() {
+                    android_log!(
+                        "nativeLookup: create_word_with_tagged_entries_jobject returned null"
+                    );
+                } else {
+                    android_log!("nativeLookup: Successfully created Java object");
+                }
+                result
+            }
+        }
+        Ok(None) => {
+            android_log!("nativeLookup: Word not found in dictionary");
+            std::ptr::null_mut()
+        }
+        Err(e) => {
+            android_log!(format!("nativeLookup: Lookup error: {:?}", e));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -67,7 +115,10 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeClose(
     }
 }
 
-unsafe fn create_word_with_tagged_entries_jobject(env: &mut JNIEnv, word: &WordWithTaggedEntries) -> jobject {
+unsafe fn create_word_with_tagged_entries_jobject(
+    env: &mut JNIEnv,
+    word: &WordWithTaggedEntries,
+) -> jobject {
     // Create ArrayList for entries
     let entries_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
         Ok(list) => list,
@@ -91,14 +142,44 @@ unsafe fn create_word_with_tagged_entries_jobject(env: &mut JNIEnv, word: &WordW
     let word_string = env.new_string(&word.word).unwrap();
     let tag_value = word.tag as i32;
 
-    // Create WordWithTaggedEntries object
+    let sounds_param = if let Some(ref sounds) = word.sounds {
+        env.new_string(sounds).ok()
+    } else {
+        None
+    };
+
+    // Create hyphenations list
+    let hyphenations_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+        Ok(list) => list,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    for hyphenation in &word.hyphenations {
+        let hyph_string = env.new_string(hyphenation).unwrap();
+        let _ = env.call_method(
+            &hyphenations_list,
+            "add",
+            "(Ljava/lang/Object;)Z",
+            &[(&hyph_string).into()],
+        );
+    }
+
+    let null_obj = JObject::null();
+    let sounds_jvalue = if let Some(ref jstring) = sounds_param {
+        jstring.into()
+    } else {
+        (&null_obj).into()
+    };
+
     match env.new_object(
         "dev/davidv/translator/WordWithTaggedEntries",
-        "(Ljava/lang/String;ILjava/util/List;)V",
+        "(Ljava/lang/String;ILjava/util/List;Ljava/lang/String;Ljava/util/List;)V",
         &[
             (&word_string).into(),
             tag_value.into(),
             (&entries_list).into(),
+            sounds_jvalue,
+            (&hyphenations_list).into(),
         ],
     ) {
         Ok(obj) => obj.into_raw(),
@@ -106,8 +187,10 @@ unsafe fn create_word_with_tagged_entries_jobject(env: &mut JNIEnv, word: &WordW
     }
 }
 
-unsafe fn create_word_entry_complete_jobject(env: &mut JNIEnv, entry: &crate::WordEntryComplete) -> jobject {
-    
+fn create_word_entry_complete_jobject(
+    env: &mut JNIEnv,
+    entry: &crate::WordEntryComplete,
+) -> jobject {
     // Create senses list
     let senses_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
         Ok(list) => list,
@@ -115,7 +198,7 @@ unsafe fn create_word_entry_complete_jobject(env: &mut JNIEnv, entry: &crate::Wo
     };
 
     for sense in &entry.senses {
-        let sense_obj = create_sense_jobject(env, sense);
+        let sense_obj = unsafe { create_sense_jobject(env, sense) };
         if sense_obj.is_null() {
             return std::ptr::null_mut();
         }
@@ -128,70 +211,10 @@ unsafe fn create_word_entry_complete_jobject(env: &mut JNIEnv, entry: &crate::Wo
         );
     }
 
-    // Create hyphenations list
-    let hyphenations_list = if let Some(hyphenations) = &entry.hyphenations {
-        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
-            Ok(list) => list,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        
-        for hyphenation in hyphenations {
-            let parts_list = create_string_list(env, Some(&hyphenation.parts));
-            let _ = env.call_method(
-                &list,
-                "add",
-                "(Ljava/lang/Object;)Z",
-                &[(&unsafe { JObject::from_raw(parts_list) }).into()],
-            );
-        }
-        list.into_raw()
-    } else {
-        std::ptr::null_mut()
-    };
-
-    // Create sounds list  
-    let sounds_list = if let Some(sounds) = &entry.sounds {
-        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
-            Ok(list) => list,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        
-        for sound in sounds {
-            let ipa_string = if let Some(ipa) = &sound.ipa {
-                env.new_string(ipa).unwrap()
-            } else {
-                env.new_string("").unwrap()
-            };
-            
-            let sound_obj = match env.new_object(
-                "dev/davidv/translator/Sound",
-                "(Ljava/lang/String;)V",
-                &[(&ipa_string).into()],
-            ) {
-                Ok(obj) => obj,
-                Err(_) => return std::ptr::null_mut(),
-            };
-            
-            let _ = env.call_method(
-                &list,
-                "add", 
-                "(Ljava/lang/Object;)Z",
-                &[(&sound_obj).into()],
-            );
-        }
-        list.into_raw()
-    } else {
-        std::ptr::null_mut()
-    };
-
     match env.new_object(
         "dev/davidv/translator/WordEntryComplete",
-        "(Ljava/util/List;Ljava/util/List;Ljava/util/List;)V",
-        &[
-            (&senses_list).into(),
-            (&unsafe { JObject::from_raw(hyphenations_list) }).into(),
-            (&unsafe { JObject::from_raw(sounds_list) }).into(),
-        ],
+        "(Ljava/util/List;)V",
+        &[(&senses_list).into()],
     ) {
         Ok(obj) => obj.into_raw(),
         Err(_) => std::ptr::null_mut(),
@@ -200,58 +223,32 @@ unsafe fn create_word_entry_complete_jobject(env: &mut JNIEnv, entry: &crate::Wo
 
 unsafe fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobject {
     let pos_string = env.new_string(&sense.pos).unwrap();
-    
-    let glosses_list = if let Some(glosses) = &sense.glosses {
-        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
-            Ok(list) => list,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        
-        for gloss in glosses {
-            let gloss_obj = create_gloss_jobject(env, gloss);
-            if gloss_obj.is_null() {
-                return std::ptr::null_mut();
-            }
-            
-            let _ = env.call_method(
-                &list,
-                "add",
-                "(Ljava/lang/Object;)Z",
-                &[(&unsafe { JObject::from_raw(gloss_obj) }).into()],
-            );
-        }
-        list.into_raw()
-    } else {
-        std::ptr::null_mut()
-    };
 
-    let form_of_list = if let Some(form_of) = &sense.form_of {
-        let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
-            Ok(list) => list,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        
-        for form in form_of {
-            let form_word = env.new_string(&form.word).unwrap();
-            let _ = env.call_method(
-                &list,
-                "add",
-                "(Ljava/lang/Object;)Z",
-                &[(&form_word).into()],
-            );
-        }
-        list.into_raw()
-    } else {
-        std::ptr::null_mut()
+    let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+        Ok(list) => list,
+        Err(_) => return std::ptr::null_mut(),
     };
+    for gloss in &sense.glosses {
+        let gloss_obj = unsafe { create_gloss_jobject(env, gloss) };
+        if gloss_obj.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        let _ = env.call_method(
+            &list,
+            "add",
+            "(Ljava/lang/Object;)Z",
+            &[(&unsafe { JObject::from_raw(gloss_obj) }).into()],
+        );
+    }
+    let glosses_list = list.into_raw();
 
     match env.new_object(
         "dev/davidv/translator/Sense",
-        "(Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V",
+        "(Ljava/lang/String;Ljava/util/List;)V",
         &[
             (&pos_string).into(),
             (&unsafe { JObject::from_raw(glosses_list) }).into(),
-            (&unsafe { JObject::from_raw(form_of_list) }).into(),
         ],
     ) {
         Ok(obj) => obj.into_raw(),
@@ -260,23 +257,25 @@ unsafe fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobjec
 }
 
 unsafe fn create_gloss_jobject(env: &mut JNIEnv, gloss: &crate::Gloss) -> jobject {
-    let gloss_string = env.new_string(&gloss.gloss).unwrap();
-    let shared_prefix_count = gloss.shared_prefix_count as i32;
-    
-    let new_categories_list = if let Some(categories) = &gloss.new_categories {
-        create_string_list(env, Some(categories))
-    } else {
-        std::ptr::null_mut()
+    let gloss_lines_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+        Ok(list) => list,
+        Err(_) => return std::ptr::null_mut(),
     };
-    
+
+    for line in &gloss.gloss_lines {
+        let line_string = env.new_string(line).unwrap();
+        let _ = env.call_method(
+            &gloss_lines_list,
+            "add",
+            "(Ljava/lang/Object;)Z",
+            &[(&line_string).into()],
+        );
+    }
+
     match env.new_object(
         "dev/davidv/translator/Gloss",
-        "(ILjava/lang/String;Ljava/util/List;)V",
-        &[
-            shared_prefix_count.into(),
-            (&gloss_string).into(),
-            (&unsafe { JObject::from_raw(new_categories_list) }).into(),
-        ],
+        "(Ljava/util/List;)V",
+        &[(&gloss_lines_list).into()],
     ) {
         Ok(obj) => obj.into_raw(),
         Err(_) => std::ptr::null_mut(),
@@ -295,12 +294,7 @@ unsafe fn create_string_list(env: &mut JNIEnv, strings: Option<&Vec<String>>) ->
                 Ok(jstring) => jstring,
                 Err(_) => continue,
             };
-            let _ = env.call_method(
-                &list,
-                "add",
-                "(Ljava/lang/Object;)Z",
-                &[(&jstring).into()],
-            );
+            let _ = env.call_method(&list, "add", "(Ljava/lang/Object;)Z", &[(&jstring).into()]);
         }
     }
 
