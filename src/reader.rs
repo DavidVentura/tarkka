@@ -67,7 +67,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
 
         let level2_off = level1_size + HEADER_SIZE as u32;
         let offset_file = OffsetFile::new(r, level2_off as u64)?;
-        let decoder = zeekstd::Decoder::new(offset_file).unwrap();
+        let decoder = zeekstd::Decoder::new(offset_file)?;
 
         let binary_data_off = level2_size;
         Ok(DictionaryReader {
@@ -97,11 +97,12 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             };
 
         let result = self.find_in_level2_group(group_offset, group_size, word)?;
-        if result.is_none() {
-            return Ok(None);
-        }
 
-        let (relative_binary_offset, binary_size) = result.unwrap();
+        let (relative_binary_offset, binary_size) = match result {
+            None => return Ok(None),
+            Some(r) => (r.0, r.1),
+        };
+
         let absolute_binary_offset =
             binary_base_offset + relative_binary_offset + self.binary_data_off;
         match self.get_word_from_binary_data(absolute_binary_offset, binary_size, word) {
@@ -169,7 +170,9 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         let mut current_word: Vec<u8> = Vec::new();
         let mut binary_offset = 0u32;
 
-        while pos + 4 <= decompressed.len() {
+        // entry size = 1u8 shlen + 1u8 suffixlen + 1 byte suffix + 1 byte entrylen
+        let minimal_entry_size = 4;
+        while pos + minimal_entry_size <= decompressed.len() {
             let shared_len = decompressed[pos] as usize;
             pos += 1;
 
@@ -177,7 +180,12 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             pos += 1;
 
             if pos + suffix_len + 2 > decompressed.len() {
-                panic!("malformed data, expected suffix but got EOF");
+                // TODO: why does this happen? eg: Holzz in eng dict
+                return Ok(None);
+                //panic!(
+                //    "malformed data, expected suffix but got EOF, pos {} shlen {} suflen {}",
+                //    pos, shared_len, suffix_len
+                //);
             }
 
             assert!(suffix_len > 0);
@@ -207,6 +215,11 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             if word_buf == wanted_word_b {
                 return Ok(Some((binary_offset, binary_size)));
             }
+
+            if word_buf.as_slice() > wanted_word_b {
+                return Ok(None);
+            }
+
             current_word = word_buf;
 
             binary_offset += binary_size as u32;
