@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::time::Instant;
+use tarkka::de::CompactDeserialize;
 use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
 use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
 
@@ -11,84 +12,99 @@ pub mod ser;
 use tarkka::ser::{CompactSerialize, VarUint};
 use zeekstd::{EncodeOptions, FrameSizePolicy};
 
-fn lang_words(
-    word_lang: &str,
-    gloss_lang: &str,
-) -> Vec<(
-    String,
-    WordEntryComplete,
-    Vec<tarkka::kaikki::Sound>,
-    Vec<tarkka::kaikki::Hyphenation>,
-    bool,
-)> {
-    let good_words = match File::open(format!(
-        "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
-    )) {
-        Ok(mut f) => {
-            println!("parsing json from pre-filtered");
-            let mut s = String::new();
-            f.read_to_string(&mut s).unwrap();
-            let kaikki_words: Vec<(String, KaikkiWordEntry)> =
-                serde_json::from_str(s.as_str()).unwrap();
-            let words: Vec<(
-                String,
-                WordEntryComplete,
-                Vec<tarkka::kaikki::Sound>,
-                Vec<tarkka::kaikki::Hyphenation>,
-            )> = kaikki_words
-                .into_iter()
-                .map(|(s, kw)| {
-                    let (entry, sounds, hyphenations) = kw.to_word_entry_complete();
-                    (s.clone(), entry, sounds, hyphenations)
-                })
-                .collect();
-            let is_monolingual = word_lang == gloss_lang;
-            words
-                .into_iter()
-                .map(|(word, w, sounds, hyphenations)| {
-                    (word, w, sounds, hyphenations, is_monolingual)
-                })
-                .collect()
-            // serde_json::from_reader(f).unwrap()
-            // much slower??
-        }
-        Err(_) => {
-            println!("filtered not found, creating");
-            let f = File::open(format!("{gloss_lang}-raw-wiktextract-data.jsonl")).unwrap();
-            let s = Instant::now();
-            let good_words = filter(word_lang, f);
-            println!("Filter took {:?}", s.elapsed());
-            let s = Instant::now();
-            {
-                let mut f = File::create(format!(
-                    "filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.jsonl"
-                ))
-                .unwrap();
-                //let ser = serde_json::to_string_pretty(&good_words).unwrap();
-                //f.write_all(ser.as_bytes()).unwrap();
-                //TODO
-            }
-            println!("serialize took {:?}", s.elapsed());
-            let is_monolingual = word_lang == gloss_lang;
-            good_words
-                .into_iter()
-                .map(|(word, w)| {
-                    let (entry, sounds, hyphenations) = w.to_word_entry_complete();
-                    (word, entry, sounds, hyphenations, is_monolingual)
-                })
-                .collect()
-        }
+fn try_load_from_cache(word_lang: &str, gloss_lang: &str) -> Option<Vec<WordWithTaggedEntries>> {
+    let i = Instant::now();
+    let cache_path = format!("filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.bin");
+
+    let mut f = match File::open(&cache_path) {
+        Ok(f) => f,
+        Err(_) => return None,
     };
-    good_words
+    println!("file found");
+
+    let mut len_bytes = [0u8; 4];
+    if f.read_exact(&mut len_bytes).is_err() {
+        return None;
+    }
+    let len = u32::from_le_bytes(len_bytes) as usize;
+
+    let mut entries = Vec::with_capacity(len);
+    for _ in 0..len {
+        // Read word string first (length + string data)
+        let mut word_len_bytes = [0u8; 1];
+        if f.read_exact(&mut word_len_bytes).is_err() {
+            return None;
+        }
+        let word_len = word_len_bytes[0] as usize;
+
+        let mut word_bytes = vec![0u8; word_len];
+        if f.read_exact(&mut word_bytes).is_err() {
+            return None;
+        }
+        let word = unsafe { String::from_utf8_unchecked(word_bytes) };
+
+        // Then deserialize the entry and set the word
+        match WordWithTaggedEntries::deserialize(&mut f) {
+            Ok(mut entry) => {
+                entry.word = word;
+                entries.push(entry);
+            }
+            Err(_) => return None,
+        }
+    }
+
+    println!("Loaded {} entries from cache={:?}", len, i.elapsed());
+    Some(entries)
+}
+
+fn cache_filtered_data(word_lang: &str, gloss_lang: &str, filtered: &[WordWithTaggedEntries]) {
+    let cache_path = format!("filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.bin");
+    let mut f = File::create(&cache_path).unwrap();
+    f.write_all(&(filtered.len() as u32).to_le_bytes()).unwrap();
+    for w in filtered {
+        // Write word string first (length + string data)
+        let word_bytes = w.word.as_bytes();
+        f.write_all(&[word_bytes.len() as u8]).unwrap();
+        f.write_all(word_bytes).unwrap();
+
+        // Then serialize the entry (word field is skipped automatically)
+        w.serialize(&mut f).unwrap();
+    }
+    println!("Cached {} entries to: {}", filtered.len(), cache_path);
+}
+
+fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<WordWithTaggedEntries> {
+    // Try to load from cache first
+    if let Some(cached) = try_load_from_cache(word_lang, gloss_lang) {
+        return cached;
+    }
+
+    // Not in cache, process from raw data
+    let f = File::open(format!("{gloss_lang}-raw-wiktextract-data.jsonl")).unwrap();
+    let s = Instant::now();
+    let good_words = filter(word_lang, f);
+    println!("Filter took {:?}", s.elapsed());
+    let s = Instant::now();
+    println!("serialize took {:?}", s.elapsed());
+    let tag = match (word_lang, gloss_lang) {
+        (_, "en") => WordTag::English,
+        (x, y) if x == y => WordTag::Monolingual,
+        (_, _) => panic!("idk what to do {word_lang} {gloss_lang}"),
+    };
+    let filtered: Vec<WordWithTaggedEntries> = good_words
+        .into_iter()
+        .map(|w| w.to_word_entry_complete(tag))
+        .collect();
+
+    cache_filtered_data(word_lang, gloss_lang, &filtered);
+    filtered
 }
 
 fn main() {
     let word_lang = "es";
     let good_words1 = lang_words(word_lang, "es");
-    let mut good_words2 = lang_words(word_lang, "en");
+    let good_words2 = lang_words(word_lang, "en");
     println!("entries ES {} EN {}", good_words1.len(), good_words2.len());
-    let mut all_tagged_entries = good_words1;
-    all_tagged_entries.append(&mut good_words2);
 
     /*
     let word_lang = "en";
@@ -98,7 +114,7 @@ fn main() {
     */
 
     let s = Instant::now();
-    let words = build_tagged_index(all_tagged_entries);
+    let words = build_tagged_index(good_words1, good_words2);
     println!("Build index took {:?}", s.elapsed());
 
     let s = Instant::now();
@@ -245,11 +261,11 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
     );
 }
 
-fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<(String, KaikkiWordEntry)> {
+fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<KaikkiWordEntry> {
     let reader = BufReader::new(raw_data);
     let lines = reader.lines();
     let unwanted_pos = vec!["proverb"];
-    let mut words: Vec<(String, KaikkiWordEntry)> = Vec::with_capacity(1_000_000);
+    let mut words: Vec<KaikkiWordEntry> = Vec::with_capacity(1_000_000);
 
     for line in lines {
         let line = line.unwrap();
@@ -300,71 +316,41 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<(String, Kaikki
 
         kaikki_word.sounds.retain_mut(|s| s.ipa.is_some());
 
-        let word_str = kaikki_word.word.clone();
-        words.push((word_str, kaikki_word));
+        words.push(kaikki_word);
     }
     words
 }
 
-// TODO: this should not take shitty entries with the Kaikki limitatios
-fn aggregate_entries(
-    entries: Vec<(
-        WordEntryComplete,
-        Vec<tarkka::kaikki::Sound>,
-        Vec<tarkka::kaikki::Hyphenation>,
-    )>,
-    _is_monolingual_first: bool,
-) -> (
-    WordEntryComplete,
-    Option<String>,
-    Option<tarkka::kaikki::Hyphenation>,
-) {
+fn aggregate_entries(entries: Vec<WordWithTaggedEntries>) -> WordEntryComplete {
     if entries.is_empty() {
         panic!("Cannot aggregate empty entries");
     }
 
-    // Extract sounds and hyphenations from all entries
-    let mut selected_sound = None;
-    let mut selected_hyphenation = None;
-
-    // Priority: first available (monolingual first if is_monolingual_first is true)
-    for (_, sounds, hyphenations) in &entries {
-        if selected_sound.is_none() && !sounds.is_empty() {
-            if let Some(sound) = sounds.first() {
-                if let Some(ref ipa) = sound.ipa {
-                    selected_sound = Some(ipa.clone());
-                }
-            }
-        }
-        if selected_hyphenation.is_none() && !hyphenations.is_empty() {
-            selected_hyphenation = hyphenations.first().cloned();
-        }
-        if selected_sound.is_some() && selected_hyphenation.is_some() {
-            break;
-        }
-    }
-
     if entries.len() == 1 {
-        let (mut entry, _, _) = entries.into_iter().next().unwrap();
+        let entry_data = entries.into_iter().next().unwrap();
+        let mut word_entry = entry_data.entries.into_iter().next().unwrap_or_else(|| {
+            panic!("WordWithTaggedEntries must have at least one entry");
+        });
         // Still need to compress categories and merge senses even for single entry
-        merge_same_pos_senses(&mut entry.senses);
-        return (entry, selected_sound, selected_hyphenation);
+        merge_same_pos_senses(&mut word_entry.senses);
+        return word_entry;
     }
 
     // Take the first entry as base and aggregate others into it
-    let mut base = entries[0].0.clone();
+    let mut base = entries[0].entries[0].clone();
 
-    for (entry, _, _) in entries.into_iter().skip(1) {
-        // Aggregate senses with POS preserved in each sense
-        for sense in entry.senses {
-            base.senses.push(sense);
+    for entry_data in entries.into_iter() {
+        for word_entry in entry_data.entries {
+            // Aggregate senses with POS preserved in each sense
+            for sense in word_entry.senses {
+                base.senses.push(sense);
+            }
         }
     }
 
     // Merge senses with the same POS and compress categories after aggregation
     merge_same_pos_senses(&mut base.senses);
-
-    (base, selected_sound, selected_hyphenation)
+    base
 }
 
 fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
@@ -392,92 +378,102 @@ fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
 }
 
 pub fn build_tagged_index(
-    tagged_words: Vec<(
-        String,
-        WordEntryComplete,
-        Vec<tarkka::kaikki::Sound>,
-        Vec<tarkka::kaikki::Hyphenation>,
-        bool,
-    )>,
+    monolingual_entries: Vec<WordWithTaggedEntries>,
+    english_entries: Vec<WordWithTaggedEntries>,
 ) -> Vec<WordWithTaggedEntries> {
-    let mut word_groups: HashMap<
-        String,
-        (
-            Vec<(
-                WordEntryComplete,
-                Vec<tarkka::kaikki::Sound>,
-                Vec<tarkka::kaikki::Hyphenation>,
-            )>,
-            Vec<(
-                WordEntryComplete,
-                Vec<tarkka::kaikki::Sound>,
-                Vec<tarkka::kaikki::Hyphenation>,
-            )>,
-        ),
-    > = HashMap::new();
+    let mut word_groups: HashMap<String, (Vec<WordWithTaggedEntries>, Vec<WordWithTaggedEntries>)> =
+        HashMap::new();
 
-    for (word_str, word_entry, sounds, hyphenations, is_monolingual) in tagged_words {
-        let entry = word_groups
+    // Populate monolingual entries
+    for entry in monolingual_entries {
+        let word_str = entry.word.clone();
+        word_groups
             .entry(word_str)
-            .or_insert((Vec::new(), Vec::new()));
-        if is_monolingual {
-            entry.0.push((word_entry, sounds, hyphenations));
-        } else {
-            entry.1.push((word_entry, sounds, hyphenations));
-        }
+            .or_insert((Vec::new(), Vec::new()))
+            .0
+            .push(entry);
     }
 
-    let mut result: Vec<WordWithTaggedEntries> = word_groups
-        .into_iter()
-        .map(|(word, (mono_entries, eng_entries))| {
-            let tag = match (mono_entries.is_empty(), eng_entries.is_empty()) {
-                (false, true) => WordTag::Monolingual,
-                (true, false) => WordTag::English,
-                (false, false) => WordTag::Both,
-                (true, true) => unreachable!("Empty word group"),
-            };
+    // Populate English entries
+    for entry in english_entries {
+        let word_str = entry.word.clone();
+        word_groups
+            .entry(word_str)
+            .or_insert((Vec::new(), Vec::new()))
+            .1
+            .push(entry);
+    }
 
-            // Aggregate entries of the same type into single comprehensive entries
-            let (entries, selected_sound, selected_hyphenation) = match tag {
-                WordTag::Monolingual => {
-                    let (entry, sound, hyph) = aggregate_entries(mono_entries, true);
-                    (vec![entry], sound, hyph)
-                }
-                WordTag::English => {
-                    let (entry, sound, hyph) = aggregate_entries(eng_entries, false);
-                    (vec![entry], sound, hyph)
-                }
-                WordTag::Both => {
-                    let (mono_entry, mono_sound, mono_hyph) = aggregate_entries(mono_entries, true);
-                    let (eng_entry, eng_sound, eng_hyph) = aggregate_entries(eng_entries, false);
+    // Helper to extract sounds and hyphenations from entries
+    let extract_sound_and_hyph =
+        |entries: &[WordWithTaggedEntries]| -> (Option<String>, Vec<String>) {
+            let selected_sound = entries.iter().find_map(|e| e.sounds.clone());
+            let selected_hyphenation = entries
+                .iter()
+                .find(|e| !e.hyphenations.is_empty())
+                .map(|e| e.hyphenations.clone())
+                .unwrap_or_default();
+            (selected_sound, selected_hyphenation)
+        };
 
-                    // Prefer monolingual sound/hyphenation, fallback to English
-                    let selected_sound = mono_sound.or(eng_sound);
-                    let selected_hyphenation = mono_hyph.or(eng_hyph);
+    // Get all words in alphabetical order
+    let mut words: Vec<String> = word_groups.keys().cloned().collect();
+    words.sort();
 
-                    (
-                        vec![mono_entry, eng_entry],
-                        selected_sound,
-                        selected_hyphenation,
-                    )
-                }
-            };
+    let mut result: Vec<WordWithTaggedEntries> = Vec::new();
 
-            WordWithTaggedEntries {
-                word,
-                tag,
-                entries,
-                sounds: selected_sound,
-                hyphenations: if let Some(h) = selected_hyphenation {
-                    h.parts
-                } else {
-                    vec![]
-                },
+    for word in words {
+        let (mono_entries, eng_entries) = word_groups.remove(&word).unwrap();
+
+        let tag = match (mono_entries.is_empty(), eng_entries.is_empty()) {
+            (false, true) => WordTag::Monolingual,
+            (true, false) => WordTag::English,
+            (false, false) => WordTag::Both,
+            (true, true) => unreachable!("Empty word group"),
+        };
+
+        let (entries, selected_sound, selected_hyphenation) = match tag {
+            WordTag::Monolingual => {
+                let (sound, hyph) = extract_sound_and_hyph(&mono_entries);
+                let entry = aggregate_entries(mono_entries);
+                (vec![entry], sound, hyph)
             }
-        })
-        .collect();
+            WordTag::English => {
+                let (sound, hyph) = extract_sound_and_hyph(&eng_entries);
+                let entry = aggregate_entries(eng_entries);
+                (vec![entry], sound, hyph)
+            }
+            WordTag::Both => {
+                // Prefer monolingual sound/hyphenation, fallback to English
+                let (mono_sound, mono_hyph) = extract_sound_and_hyph(&mono_entries);
+                let (eng_sound, eng_hyph) = extract_sound_and_hyph(&eng_entries);
 
-    result.sort_by(|a, b| a.word.cmp(&b.word));
+                let eng_entry = aggregate_entries(eng_entries);
+                let mono_entry = aggregate_entries(mono_entries);
+
+                let selected_sound = mono_sound.or(eng_sound);
+                let selected_hyphenation = if !mono_hyph.is_empty() {
+                    mono_hyph
+                } else {
+                    eng_hyph
+                };
+
+                (
+                    vec![mono_entry, eng_entry],
+                    selected_sound,
+                    selected_hyphenation,
+                )
+            }
+        };
+
+        result.push(WordWithTaggedEntries {
+            word,
+            tag,
+            entries,
+            sounds: selected_sound,
+            hyphenations: selected_hyphenation,
+        });
+    }
     result
 }
 

@@ -1,4 +1,4 @@
-use crate::{Gloss, Sense, WordEntryComplete};
+use crate::{Gloss, Sense, WordEntryComplete, WordTag, WordWithTaggedEntries};
 use itertools::Itertools;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -36,7 +36,7 @@ pub struct KaikkiSense {
 }
 
 impl KaikkiWordEntry {
-    pub fn to_word_entry_complete(self) -> (WordEntryComplete, Vec<Sound>, Vec<Hyphenation>) {
+    pub fn to_word_entry_complete(self, tag: WordTag) -> WordWithTaggedEntries {
         let pos = self.pos.unwrap_or_else(|| "unknown".to_string());
         let senses = self
             .senses
@@ -58,6 +58,27 @@ impl KaikkiWordEntry {
             })
             .collect();
 
-        (WordEntryComplete { senses }, self.sounds, self.hyphenations)
+        let hyp: Vec<Vec<String>> = self
+            .hyphenations
+            .iter()
+            .filter_map(|h| {
+                if h.parts.len() > 0 {
+                    Some(h.parts.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        WordWithTaggedEntries {
+            tag,
+            word: self.word,
+            entries: vec![WordEntryComplete { senses }],
+            sounds: self
+                .sounds
+                .iter()
+                .find(|e| e.ipa.is_some())
+                .and_then(|e| e.ipa.clone()),
+            hyphenations: hyp.first().cloned().unwrap_or(vec![]),
+        }
     }
 }

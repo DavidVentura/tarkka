@@ -1,4 +1,3 @@
-use crate::ser::VarUint;
 use crate::{HEADER_SIZE, WordWithTaggedEntries};
 use std::io::Seek;
 use std::io::{Read, SeekFrom};
@@ -201,6 +200,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             word_buf.extend_from_slice(suffix_b);
 
             // Read binary data size VarUint
+            // TODO: use VarUint instead of duplicated logic
             let maybe_size_bytes = &decompressed[pos..pos + 2];
             pos += 1;
             let first_byte = maybe_size_bytes[0];
