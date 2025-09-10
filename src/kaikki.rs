@@ -47,6 +47,7 @@ impl KaikkiWordEntry {
                     gloss_lines: kaikki_sense
                         .glosses
                         .iter()
+                        .filter(|s| !(s.starts_with("More information") && s.len() > 512))
                         .map(|s| s.as_str().trim().trim_end_matches(".").to_string())
                         .unique()
                         .collect(),

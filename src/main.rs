@@ -2,85 +2,27 @@ use itertools::Itertools;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
+use std::path::Path;
+use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
 use std::time::Instant;
-use tarkka::de::CompactDeserialize;
 use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
 use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
+use threadpool::ThreadPool;
+
+// Supported languages from Language.kt
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "sq", "ar", "az", "bn", "bg", "ca", "zh", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
+    "el", "gu", "he", "hi", "hu", "id", "it", "ja", "kn", "ko", "lv", "lt", "ms", "ml", "fa", "pl",
+    "pt", "ro", "ru", "sk", "sl", "es", "sv", "ta", "te", "tr", "uk",
+];
 
 pub mod reader;
 pub mod ser;
 use tarkka::ser::{CompactSerialize, VarUint};
 use zeekstd::{EncodeOptions, FrameSizePolicy};
 
-fn try_load_from_cache(word_lang: &str, gloss_lang: &str) -> Option<Vec<WordWithTaggedEntries>> {
-    let i = Instant::now();
-    let cache_path = format!("filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.bin");
-
-    let mut f = match File::open(&cache_path) {
-        Ok(f) => f,
-        Err(_) => return None,
-    };
-    println!("file found");
-
-    let mut len_bytes = [0u8; 4];
-    if f.read_exact(&mut len_bytes).is_err() {
-        return None;
-    }
-    let len = u32::from_le_bytes(len_bytes) as usize;
-
-    let mut entries = Vec::with_capacity(len);
-    for _ in 0..len {
-        // Read word string first (length + string data)
-        let mut word_len_bytes = [0u8; 1];
-        if f.read_exact(&mut word_len_bytes).is_err() {
-            return None;
-        }
-        let word_len = word_len_bytes[0] as usize;
-
-        let mut word_bytes = vec![0u8; word_len];
-        if f.read_exact(&mut word_bytes).is_err() {
-            return None;
-        }
-        let word = unsafe { String::from_utf8_unchecked(word_bytes) };
-
-        // Then deserialize the entry and set the word
-        match WordWithTaggedEntries::deserialize(&mut f) {
-            Ok(mut entry) => {
-                entry.word = word;
-                entries.push(entry);
-            }
-            Err(_) => return None,
-        }
-    }
-
-    println!("Loaded {} entries from cache={:?}", len, i.elapsed());
-    Some(entries)
-}
-
-fn cache_filtered_data(word_lang: &str, gloss_lang: &str, filtered: &[WordWithTaggedEntries]) {
-    let cache_path = format!("filtered-{word_lang}-{gloss_lang}-raw-wiktextract-data.bin");
-    let mut f = File::create(&cache_path).unwrap();
-    f.write_all(&(filtered.len() as u32).to_le_bytes()).unwrap();
-    for w in filtered {
-        // Write word string first (length + string data)
-        let word_bytes = w.word.as_bytes();
-        f.write_all(&[word_bytes.len() as u8]).unwrap();
-        f.write_all(word_bytes).unwrap();
-
-        // Then serialize the entry (word field is skipped automatically)
-        w.serialize(&mut f).unwrap();
-    }
-    println!("Cached {} entries to: {}", filtered.len(), cache_path);
-}
-
-fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<WordWithTaggedEntries> {
-    // Try to load from cache first
-    if let Some(cached) = try_load_from_cache(word_lang, gloss_lang) {
-        return cached;
-    }
-
-    // Not in cache, process from raw data
-    let f = File::open(format!("{gloss_lang}-raw-wiktextract-data.jsonl")).unwrap();
+fn lang_words(word_lang: &str, gloss_lang: &str, fname: &str) -> Vec<WordWithTaggedEntries> {
+    let f = File::open(fname).unwrap();
     let s = Instant::now();
     let good_words = filter(word_lang, f);
     println!("Filter took {:?}", s.elapsed());
@@ -96,31 +38,106 @@ fn lang_words(word_lang: &str, gloss_lang: &str) -> Vec<WordWithTaggedEntries> {
         .map(|w| w.to_word_entry_complete(tag))
         .collect();
 
-    cache_filtered_data(word_lang, gloss_lang, &filtered);
     filtered
 }
 
-fn main() {
-    let word_lang = "es";
-    let good_words1 = lang_words(word_lang, "es");
-    let good_words2 = lang_words(word_lang, "en");
-    println!("entries ES {} EN {}", good_words1.len(), good_words2.len());
+fn create_dictionary(lang: &str) -> Result<String, Box<dyn std::error::Error>> {
+    println!("Processing: {}", lang);
 
-    /*
-    let word_lang = "en";
-    let all_tagged_entries = lang_words(word_lang, "en");
-    let word_lang = "es";
-    let all_tagged_entries = lang_words(word_lang, "es");
-    */
+    let monolingual_path = format!("out/monolingual/{}.jsonl", lang);
+    let english_path = format!("out/english/{}.jsonl", lang);
+
+    // Check what files are available
+    let has_monolingual = Path::new(&monolingual_path).exists();
+    let has_english = Path::new(&english_path).exists();
+
+    if !has_monolingual && !has_english {
+        return Err(format!("No files available for {}", lang).into());
+    }
+
+    let is_multi = has_monolingual && has_english;
+    let output_filename = if is_multi {
+        format!("out/dictionaries/{}-multi-dictionary.dict", lang)
+    } else {
+        format!("out/dictionaries/{}-english-dictionary.dict", lang)
+    };
+
+    // Check if output file already exists
+    if Path::new(&output_filename).exists() {
+        println!("Dictionary already exists, skipping: {}", output_filename);
+        return Ok(output_filename);
+    }
+
+    // Load available data
+    let (good_words1, good_words2) = if has_monolingual && has_english {
+        // Both available - multi dictionary
+        let mono = lang_words(lang, lang, &monolingual_path);
+        let eng = lang_words(lang, "en", &english_path);
+        println!(
+            "entries {} (mono) {} {} (eng) {}",
+            lang.to_uppercase(),
+            mono.len(),
+            lang.to_uppercase(),
+            eng.len()
+        );
+        (mono, eng)
+    } else if has_english {
+        // Only English available - english dictionary
+        let eng = lang_words(lang, "en", &english_path);
+        println!("entries {} (eng) {}", lang.to_uppercase(), eng.len());
+        (Vec::new(), eng)
+    } else {
+        // Only monolingual available - treat as multi but with empty English
+        let mono = lang_words(lang, lang, &monolingual_path);
+        println!("entries {} (mono) {}", lang.to_uppercase(), mono.len());
+        (mono, Vec::new())
+    };
 
     let s = Instant::now();
     let words = build_tagged_index(good_words1, good_words2);
     println!("Build index took {:?}", s.elapsed());
 
     let s = Instant::now();
-    let file = File::create(format!("{word_lang}-multi-dictionary.dict")).unwrap();
+
+    let file = File::create(&output_filename)?;
     write_tagged(file, words);
-    println!("writing took {:?}", s.elapsed());
+    println!("Writing took {:?}", s.elapsed());
+    println!("Created: {}\n", output_filename);
+
+    Ok(output_filename)
+}
+
+fn main() {
+    let pool = ThreadPool::new(4);
+    let created_dictionaries = Arc::new(AtomicUsize::new(0));
+    let skipped_languages = Arc::new(AtomicUsize::new(0));
+
+    for &lang in SUPPORTED_LANGUAGES {
+        let created_ref = Arc::clone(&created_dictionaries);
+        let skipped_ref = Arc::clone(&skipped_languages);
+        
+        pool.execute(move || {
+            match create_dictionary(lang) {
+                Ok(_) => {
+                    created_ref.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    println!("Skipping {}: {}", lang, e);
+                    skipped_ref.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    pool.join();
+
+    let created = created_dictionaries.load(Ordering::Relaxed);
+    let skipped = skipped_languages.load(Ordering::Relaxed);
+
+    println!(
+        "Completed: {} dictionaries created, {} languages skipped",
+        created, skipped
+    );
 }
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
@@ -183,7 +200,11 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
             );
 
             let ser_size = word.serialize(&mut all_serialized).unwrap();
-            assert!(ser_size <= u16::MAX as usize);
+            assert!(
+                ser_size <= (u16::MAX / 2u16) as usize,
+                "word too long {:#?}",
+                word
+            );
             let ss: VarUint = ser_size.into();
             if ser_size < 127 {
                 under_1b += 1;
