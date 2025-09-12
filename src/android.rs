@@ -20,7 +20,11 @@ macro_rules! android_log {
         unsafe {
             let tag = CString::new("TarkkaNative").unwrap();
             let message = CString::new($msg).unwrap();
-            __android_log_write(ANDROID_LOG_DEBUG, tag.as_ptr(), message.as_ptr());
+            __android_log_write(
+                ANDROID_LOG_DEBUG,
+                tag.as_ptr() as *const i8,
+                message.as_ptr() as *const i8,
+            );
         }
     };
 }
@@ -81,17 +85,13 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeLookup(
     match reader.lookup(&word) {
         Ok(Some(word_with_entries)) => {
             android_log!("nativeLookup: Found word, creating Java object");
-            unsafe {
-                let result = create_word_with_tagged_entries_jobject(&mut env, &word_with_entries);
-                if result.is_null() {
-                    android_log!(
-                        "nativeLookup: create_word_with_tagged_entries_jobject returned null"
-                    );
-                } else {
-                    android_log!("nativeLookup: Successfully created Java object");
-                }
-                result
+            let result = create_word_with_tagged_entries_jobject(&mut env, &word_with_entries);
+            if result.is_null() {
+                android_log!("nativeLookup: create_word_with_tagged_entries_jobject returned null");
+            } else {
+                android_log!("nativeLookup: Successfully created Java object");
             }
+            result
         }
         Ok(None) => {
             android_log!("nativeLookup: Word not found in dictionary");
@@ -115,7 +115,7 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeClose(
     }
 }
 
-unsafe fn create_word_with_tagged_entries_jobject(
+fn create_word_with_tagged_entries_jobject(
     env: &mut JNIEnv,
     word: &WordWithTaggedEntries,
 ) -> jobject {
@@ -198,7 +198,7 @@ fn create_word_entry_complete_jobject(
     };
 
     for sense in &entry.senses {
-        let sense_obj = unsafe { create_sense_jobject(env, sense) };
+        let sense_obj = create_sense_jobject(env, sense);
         if sense_obj.is_null() {
             return std::ptr::null_mut();
         }
@@ -221,7 +221,7 @@ fn create_word_entry_complete_jobject(
     }
 }
 
-unsafe fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobject {
+fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobject {
     let pos_string = env.new_string(&sense.pos).unwrap();
 
     let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
@@ -229,7 +229,7 @@ unsafe fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobjec
         Err(_) => return std::ptr::null_mut(),
     };
     for gloss in &sense.glosses {
-        let gloss_obj = unsafe { create_gloss_jobject(env, gloss) };
+        let gloss_obj = create_gloss_jobject(env, gloss);
         if gloss_obj.is_null() {
             return std::ptr::null_mut();
         }
@@ -256,7 +256,7 @@ unsafe fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobjec
     }
 }
 
-unsafe fn create_gloss_jobject(env: &mut JNIEnv, gloss: &crate::Gloss) -> jobject {
+fn create_gloss_jobject(env: &mut JNIEnv, gloss: &crate::Gloss) -> jobject {
     let gloss_lines_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
         Ok(list) => list,
         Err(_) => return std::ptr::null_mut(),
@@ -280,23 +280,4 @@ unsafe fn create_gloss_jobject(env: &mut JNIEnv, gloss: &crate::Gloss) -> jobjec
         Ok(obj) => obj.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
-}
-
-unsafe fn create_string_list(env: &mut JNIEnv, strings: Option<&Vec<String>>) -> jobject {
-    let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
-        Ok(list) => list,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    if let Some(vec) = strings {
-        for s in vec {
-            let jstring = match env.new_string(s) {
-                Ok(jstring) => jstring,
-                Err(_) => continue,
-            };
-            let _ = env.call_method(&list, "add", "(Ljava/lang/Object;)Z", &[(&jstring).into()]);
-        }
-    }
-
-    list.into_raw()
 }

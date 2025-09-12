@@ -1,37 +1,43 @@
 use crate::{Gloss, Sense, WordEntryComplete, WordTag, WordWithTaggedEntries};
 use itertools::Itertools;
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[cfg(feature = "indexer")]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "indexer", derive(Debug, Serialize, Deserialize))]
 pub struct Sound {
     pub ipa: Option<String>,
 }
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "indexer", derive(Debug, Serialize, Deserialize))]
 pub struct WordEntry {
     pub pos: Option<String>,
     pub lang_code: Option<String>,
     pub word: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "indexer", derive(Debug, Serialize, Deserialize))]
 pub struct Hyphenation {
     pub parts: Vec<String>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "indexer", derive(Debug, Serialize, Deserialize))]
 pub struct KaikkiWordEntry {
     pub pos: Option<String>,
     pub word: String,
     pub senses: Vec<KaikkiSense>,
-    #[serde(default)]
+    #[cfg_attr(feature = "indexer", serde(default))]
     pub hyphenations: Vec<Hyphenation>,
-    #[serde(default)]
+    #[cfg_attr(feature = "indexer", serde(default))]
     pub sounds: Vec<Sound>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "indexer", derive(Debug, Serialize, Deserialize))]
 pub struct KaikkiSense {
-    #[serde(default)]
+    #[cfg_attr(feature = "indexer", serde(default))]
     pub glosses: Vec<String>,
 }
 

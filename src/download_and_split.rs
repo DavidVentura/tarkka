@@ -14,7 +14,7 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "pt", "ro", "ru", "sk", "sl", "es", "sv", "ta", "te", "tr", "uk",
 ];
 
-fn download_file(url: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn download_file(url: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if Path::new(output_path).exists() {
         println!("File already exists: {}", output_path);
         return Ok(());
@@ -42,7 +42,7 @@ fn split_file(
     input_file: &str,
     output_dir: &str,
     filter_lang: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let start = Instant::now();
     let mut stats = std::collections::HashMap::new();
     let mut total_lines = 0;

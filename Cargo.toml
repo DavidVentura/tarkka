@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
+name = "indexer"
+path = "src/indexer.rs"
+required-features = ["indexer"]
+
+[[bin]]
 name = "lookup"
 path = "src/lookup.rs"
 
@@ -14,6 +19,7 @@ path = "src/split_by_lang.rs"
 [[bin]]
 name = "download_and_split"
 path = "src/download_and_split.rs"
+required-features = ["indexer"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -21,19 +27,25 @@ name = "tarkka"
 path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.143"
+ureq = { version = "2.9", optional = true }
+threadpool = { version = "1.8", optional = true }
+serde_json = { version = "1.0.143", optional = true }
+flate2 = { version = "1.0", optional = true }
+serde = { version = "1.0.219", features = ["derive"], optional = true }
+
+itertools = { version = "0.14.0" }
 zeekstd = "0.6.0"
-zstd = "0.13"
-ureq = "2.9"
-threadpool = "1.8"
-flate2 = "1.0"
 tarkka_derive = { path = "tarkka_derive" }
-itertools = "0.14.0"
 
 [target.'cfg(target_os="android")'.dependencies]
 jni = { version = "0.21.1", default-features = false }
 
+[features]
+indexer = ["ureq", "threadpool", "serde", "serde_json", "flate2"]
+
 [profile.release]
 debug = true
-
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

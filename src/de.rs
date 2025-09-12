@@ -32,7 +32,8 @@ impl From<io::Error> for DeserializeError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "indexer", derive(Debug))]
 pub enum MaxLen {
     OneByte,
     TwoBytes,
