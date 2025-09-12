@@ -189,12 +189,12 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
 
         self.decoder.set_offset(group_start as u64)?;
         self.decoder.set_offset_limit(group_end as u64)?;
-        let mut decompressed = Vec::new();
+        let mut decompressed = Vec::with_capacity(32768);
         std::io::copy(&mut self.decoder, &mut decompressed)?;
 
         let wanted_word_b = word.as_bytes();
         let mut pos = 0;
-        let mut current_word: Vec<u8> = Vec::new();
+        let mut current_word: Vec<u8> = Vec::with_capacity(128);
         let mut binary_offset = 0u32;
 
         // entry size = 1u8 shlen + 1u8 suffixlen + 1 byte suffix + 1 byte entrylen
@@ -219,13 +219,11 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             let suffix_b = &decompressed[pos..pos + suffix_len];
             pos += suffix_len;
 
-            // TODO remove alloc with mem:swap
-            let mut word_buf = Vec::new();
             if shared_len > 0 {
                 assert!(current_word.len() > 0);
-                word_buf.extend_from_slice(&current_word[0..shared_len]);
+                current_word.truncate(shared_len);
             }
-            word_buf.extend_from_slice(suffix_b);
+            current_word.extend_from_slice(suffix_b);
 
             // Read binary data size VarUint
             // TODO: use VarUint instead of duplicated logic
@@ -240,15 +238,13 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
                 first_byte as u16
             };
 
-            if word_buf == wanted_word_b {
+            if current_word == wanted_word_b {
                 return Ok(Some((binary_offset, binary_size)));
             }
 
-            if word_buf.as_slice() > wanted_word_b {
+            if current_word.as_slice() > wanted_word_b {
                 return Ok(None);
             }
-
-            current_word = word_buf;
 
             binary_offset += binary_size as u32;
         }
@@ -265,7 +261,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         self.decoder.set_offset(offset as u64)?;
         self.decoder.set_offset_limit(offset as u64 + size as u64)?;
 
-        let mut decompressed = Vec::new();
+        let mut decompressed = Vec::with_capacity(32768);
         std::io::copy(&mut self.decoder, &mut decompressed)?;
         let parsed = WordWithTaggedEntries::named_deserialize(
             &mut decompressed.as_slice(),
@@ -276,14 +272,3 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         Ok(parsed)
     }
 }
-
-/*
-fn reuse_vec<T, U>(mut v: Vec<T>) -> Vec<U> {
-    const {
-        assert!(size_of::<T>() == size_of::<U>());
-        assert!(align_of::<T>() == align_of::<U>());
-    }
-    v.clear();
-    v.into_iter().map(|_| unreachable!()).collect()
-}
-*/
