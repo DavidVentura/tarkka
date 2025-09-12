@@ -15,7 +15,8 @@ use crate::de::DeserializeError;
 #[cfg(target_os = "android")]
 pub mod android;
 
-pub const HEADER_SIZE: u8 = 16;
+pub const HEADER_SIZE: u8 = 32;
+pub const TARKKA_FMT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, CompactDeserialize, CompactSerialize)]
 pub struct WordEntryComplete {

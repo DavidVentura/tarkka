@@ -3,10 +3,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::Path;
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
-use std::time::Instant;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
-use tarkka::{HEADER_SIZE, WordEntryComplete, WordTag, WordWithTaggedEntries};
+use tarkka::{HEADER_SIZE, TARKKA_FMT_VERSION, WordEntryComplete, WordTag, WordWithTaggedEntries};
 use threadpool::ThreadPool;
 
 // Supported languages from Language.kt
@@ -41,7 +44,7 @@ fn lang_words(word_lang: &str, gloss_lang: &str, fname: &str) -> Vec<WordWithTag
     filtered
 }
 
-fn create_dictionary(lang: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn create_dictionary(lang: &str, timestamp_s: u64) -> Result<String, Box<dyn std::error::Error>> {
     println!("Processing: {}", lang);
 
     let monolingual_path = format!("out/monolingual/{}.jsonl", lang);
@@ -100,7 +103,7 @@ fn create_dictionary(lang: &str) -> Result<String, Box<dyn std::error::Error>> {
     let s = Instant::now();
 
     let file = File::create(&output_filename)?;
-    write_tagged(file, words);
+    write_tagged(file, words, timestamp_s);
     println!("Writing took {:?}", s.elapsed());
     println!("Created: {}\n", output_filename);
 
@@ -108,23 +111,25 @@ fn create_dictionary(lang: &str) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn main() {
-    let pool = ThreadPool::new(4);
+    let pool = ThreadPool::new(8);
     let created_dictionaries = Arc::new(AtomicUsize::new(0));
     let skipped_languages = Arc::new(AtomicUsize::new(0));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
     for &lang in SUPPORTED_LANGUAGES {
         let created_ref = Arc::clone(&created_dictionaries);
         let skipped_ref = Arc::clone(&skipped_languages);
-        
-        pool.execute(move || {
-            match create_dictionary(lang) {
-                Ok(_) => {
-                    created_ref.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    println!("Skipping {}: {}", lang, e);
-                    skipped_ref.fetch_add(1, Ordering::Relaxed);
-                }
+
+        pool.execute(move || match create_dictionary(lang, now) {
+            Ok(_) => {
+                created_ref.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                println!("Skipping {}: {}", lang, e);
+                skipped_ref.fetch_add(1, Ordering::Relaxed);
             }
         });
     }
@@ -144,7 +149,11 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
     a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
-pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>) {
+pub fn write_tagged<W: Write>(
+    mut w: W,
+    sorted_words: Vec<WordWithTaggedEntries>,
+    timestamp_s: u64,
+) {
     let s = Instant::now();
     let mut groups: BTreeMap<[u8; 3], Vec<&WordWithTaggedEntries>> = BTreeMap::new();
     for word in &sorted_words {
@@ -256,6 +265,14 @@ pub fn write_tagged<W: Write>(mut w: W, sorted_words: Vec<WordWithTaggedEntries>
         .unwrap();
     w.write_all(&(level2_size as u32).to_le_bytes()).unwrap();
     w.write_all(&total_ser_size.to_le_bytes()).unwrap();
+    // ^16
+    w.write_all(&timestamp_s.to_le_bytes()).unwrap();
+    // ^24
+    w.write_all(&[TARKKA_FMT_VERSION]).unwrap();
+    // ^25
+    // reserved 7 bytes
+    w.write_all(&[0, 0, 0]).unwrap(); // 28
+    w.write_all(&0u32.to_le_bytes()).unwrap(); // 32
     w.write_all(&level1_data).unwrap();
     w.write_all(&output).unwrap();
     w.flush().unwrap();
@@ -502,7 +519,10 @@ pub fn build_tagged_index(
 mod tests {
     use super::*;
     use crate::reader::DictionaryReader;
-    use std::io::Cursor;
+    use std::{
+        io::Cursor,
+        time::{SystemTime, UNIX_EPOCH},
+    };
     use tarkka::{WordEntryComplete, WordTag};
 
     fn create_test_word(
@@ -647,7 +667,8 @@ mod tests {
         let tagged_words = build_tagged_index(test_words);
 
         let mut buffer = Vec::new();
-        write_tagged(&mut buffer, tagged_words);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH);
+        write_tagged(&mut buffer, tagged_words, now);
 
         let cursor = Cursor::new(buffer);
         let mut dict_reader = DictionaryReader::open(cursor).unwrap();

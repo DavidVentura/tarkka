@@ -1,6 +1,7 @@
-use crate::{HEADER_SIZE, WordWithTaggedEntries};
+use crate::{HEADER_SIZE, TARKKA_FMT_VERSION, WordWithTaggedEntries};
 use std::io::Seek;
 use std::io::{Read, SeekFrom};
+use std::time::{Duration, SystemTime};
 
 struct OffsetFile<R: Read + Seek> {
     reader: R,
@@ -36,6 +37,8 @@ impl<R: Read + Seek> Seek for OffsetFile<R> {
 }
 
 pub struct DictionaryReader<'a, R: Read + Seek> {
+    created_at: std::time::SystemTime,
+    pub version: u8,
     level1_data: Vec<u8>,
     level2_size: u32,
     binary_data_off: u32,
@@ -61,6 +64,25 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         r.read_exact(&mut size_buf)?;
         let _binary_data_size = u32::from_le_bytes(size_buf);
 
+        let mut ts_buf = [0u8; 8];
+        r.read_exact(&mut ts_buf)?;
+        let timestamp_s = u64::from_le_bytes(ts_buf);
+
+        let mut ver_buf = [0u8; 1];
+        r.read_exact(&mut ver_buf)?;
+        let ver = u8::from_le_bytes(ver_buf);
+
+        if ver != TARKKA_FMT_VERSION {
+            return Err(format!(
+                "Unsupported version {}, only support {}",
+                ver, TARKKA_FMT_VERSION
+            )
+            .into());
+        }
+
+        let mut _rsv_buf = [0u8; 7];
+        r.read_exact(&mut _rsv_buf)?;
+
         let mut level1_data = vec![0u8; level1_size as usize];
         r.read_exact(&mut level1_data)?;
 
@@ -70,11 +92,17 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
 
         let binary_data_off = level2_size;
         Ok(DictionaryReader {
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp_s),
+            version: ver,
             level1_data,
             level2_size,
             binary_data_off,
             decoder,
         })
+    }
+
+    pub fn created_at(&self) -> SystemTime {
+        self.created_at
     }
 
     pub fn lookup(

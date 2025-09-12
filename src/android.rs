@@ -43,6 +43,11 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeOpen(
     match File::open(&path) {
         Ok(file) => match DictionaryReader::open(file) {
             Ok(reader) => {
+                android_log!(format!(
+                    "Dict version {}, timestamp {:?}",
+                    reader.version,
+                    reader.created_at(),
+                ));
                 let boxed_reader = Box::new(reader);
                 Box::into_raw(boxed_reader) as jlong
             }
