@@ -59,11 +59,7 @@ fn create_dictionary(lang: &str, timestamp_s: u64) -> Result<String, Box<dyn std
     }
 
     let is_multi = has_monolingual && has_english;
-    let output_filename = if is_multi {
-        format!("out/dictionaries/{}-multi-dictionary.dict", lang)
-    } else {
-        format!("out/dictionaries/{}-english-dictionary.dict", lang)
-    };
+    let output_filename = format!("out/dictionaries/{}/{}.dict", TARKKA_FMT_VERSION, lang);
 
     // Check if output file already exists
     if Path::new(&output_filename).exists() {

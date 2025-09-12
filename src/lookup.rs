@@ -105,17 +105,18 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
 fn main() {
     let s = Instant::now();
     //let f = File::open("en-multi-dictionary.dict").unwrap();
-    let f = File::open("out/dictionaries/fr-multi-dictionary.dict").unwrap();
+    let f = File::open("out/dictionaries/1/fr.dict").unwrap();
     let bf = BufReader::new(f);
+    println!("open");
     let mut d = DictionaryReader::open(bf).unwrap();
     println!("read {:?}", s.elapsed());
     let s = Instant::now();
     //let lookup = "perro";
     let lookup = "chien";
+    println!("looking up");
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {
-        // println!("{w:#?}");
         pretty_print(lookup, w);
     } else {
         println!("not found: '{lookup}'")
