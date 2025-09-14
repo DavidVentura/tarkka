@@ -45,7 +45,7 @@ pub unsafe extern "C" fn Java_dev_davidv_translator_TarkkaBinding_nativeOpen(
             Ok(reader) => {
                 android_log!(format!(
                     "Dict version {}, timestamp {:?}",
-                    reader.version,
+                    reader.version(),
                     reader.created_at(),
                 ));
                 let boxed_reader = Box::new(reader);

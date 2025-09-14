@@ -67,7 +67,7 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
     println!("{wn} - {} - {}", ipa_str, hyph_str);
 
     // Display entries based on tag
-    println!("{w:#?}");
+    //println!("{w:#?}");
     match w.tag {
         WordTag::Monolingual => {
             // All entries are monolingual
@@ -105,14 +105,14 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
 fn main() {
     let s = Instant::now();
     //let f = File::open("en-multi-dictionary.dict").unwrap();
-    let f = File::open("out/dictionaries/1/fr.dict").unwrap();
+    let f = File::open("out/dictionaries/1/pl.dict").unwrap();
     let bf = BufReader::new(f);
-    println!("open");
+    println!("open, words");
     let mut d = DictionaryReader::open(bf).unwrap();
-    println!("read {:?}", s.elapsed());
+    println!("read {:?} - w={}", s.elapsed(), d.word_count());
     let s = Instant::now();
     //let lookup = "perro";
-    let lookup = "chien";
+    let lookup = "pies";
     println!("looking up");
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());

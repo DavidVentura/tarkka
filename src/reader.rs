@@ -38,10 +38,11 @@ impl<R: Read + Seek> Seek for OffsetFile<R> {
 
 pub struct DictionaryReader<'a, R: Read + Seek> {
     created_at: std::time::SystemTime,
-    pub version: u8,
+    version: u8,
     level1_data: Vec<u8>,
     level2_size: u32,
     binary_data_off: u32,
+    word_count: u32,
     decoder: zeekstd::Decoder<'a, OffsetFile<R>>,
 }
 
@@ -62,7 +63,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         let level2_size = u32::from_le_bytes(size_buf);
 
         r.read_exact(&mut size_buf)?;
-        let _binary_data_size = u32::from_le_bytes(size_buf);
+        let word_count = u32::from_le_bytes(size_buf);
 
         let mut ts_buf = [0u8; 8];
         r.read_exact(&mut ts_buf)?;
@@ -96,11 +97,18 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             version: ver,
             level1_data,
             level2_size,
+            word_count,
             binary_data_off,
             decoder,
         })
     }
 
+    pub fn word_count(&self) -> u32 {
+        self.word_count
+    }
+    pub fn version(&self) -> u8 {
+        self.version
+    }
     pub fn created_at(&self) -> SystemTime {
         self.created_at
     }

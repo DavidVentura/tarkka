@@ -1,16 +1,28 @@
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::Path;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
+use tarkka::reader::DictionaryReader;
 use tarkka::{HEADER_SIZE, TARKKA_FMT_VERSION, WordEntryComplete, WordTag, WordWithTaggedEntries};
 use threadpool::ThreadPool;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DictionaryMetadata {
+    size: u64,
+    filename: String,
+    date: u64,
+    word_count: u32,
+    #[serde(rename = "type")]
+    dict_type: String,
+}
 
 // Supported languages from Language.kt
 const SUPPORTED_LANGUAGES: &[&str] = &[
@@ -29,8 +41,6 @@ fn lang_words(word_lang: &str, gloss_lang: &str, fname: &str) -> Vec<WordWithTag
     let s = Instant::now();
     let good_words = filter(word_lang, f);
     println!("Filter took {:?}", s.elapsed());
-    let s = Instant::now();
-    println!("serialize took {:?}", s.elapsed());
     let tag = match (word_lang, gloss_lang) {
         (_, "en") => WordTag::English,
         (x, y) if x == y => WordTag::Monolingual,
@@ -44,7 +54,10 @@ fn lang_words(word_lang: &str, gloss_lang: &str, fname: &str) -> Vec<WordWithTag
     filtered
 }
 
-fn create_dictionary(lang: &str, timestamp_s: u64) -> Result<String, Box<dyn std::error::Error>> {
+fn create_dictionary(
+    lang: &str,
+    timestamp_s: u64,
+) -> Result<(String, String, u32), Box<dyn std::error::Error>> {
     println!("Processing: {}", lang);
 
     let monolingual_path = format!("out/monolingual/{}.jsonl", lang);
@@ -58,13 +71,22 @@ fn create_dictionary(lang: &str, timestamp_s: u64) -> Result<String, Box<dyn std
         return Err(format!("No files available for {}", lang).into());
     }
 
-    let is_multi = has_monolingual && has_english;
     let output_filename = format!("out/dictionaries/{}/{}.dict", TARKKA_FMT_VERSION, lang);
+
+    // Determine dictionary type
+    let dict_type = if has_monolingual && has_english {
+        "bilingual"
+    } else if has_english {
+        "english"
+    } else {
+        "monolingual"
+    };
 
     // Check if output file already exists
     if Path::new(&output_filename).exists() {
+        let r = DictionaryReader::open(std::fs::File::open(&output_filename).unwrap()).unwrap();
         println!("Dictionary already exists, skipping: {}", output_filename);
-        return Ok(output_filename);
+        return Ok((output_filename, dict_type.to_string(), r.word_count()));
     }
 
     // Load available data
@@ -99,17 +121,18 @@ fn create_dictionary(lang: &str, timestamp_s: u64) -> Result<String, Box<dyn std
     let s = Instant::now();
 
     let file = File::create(&output_filename)?;
-    write_tagged(file, words, timestamp_s);
+    let word_count = write_tagged(file, words, timestamp_s);
     println!("Writing took {:?}", s.elapsed());
     println!("Created: {}\n", output_filename);
 
-    Ok(output_filename)
+    Ok((output_filename, dict_type.to_string(), word_count))
 }
 
 fn main() {
-    let pool = ThreadPool::new(8);
+    let pool = ThreadPool::new(12);
     let created_dictionaries = Arc::new(AtomicUsize::new(0));
     let skipped_languages = Arc::new(AtomicUsize::new(0));
+    let dictionary_metadata = Arc::new(Mutex::new(HashMap::new()));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -118,10 +141,28 @@ fn main() {
     for &lang in SUPPORTED_LANGUAGES {
         let created_ref = Arc::clone(&created_dictionaries);
         let skipped_ref = Arc::clone(&skipped_languages);
+        let metadata_ref = Arc::clone(&dictionary_metadata);
 
         pool.execute(move || match create_dictionary(lang, now) {
-            Ok(_) => {
+            Ok((filename, dict_type, word_count)) => {
                 created_ref.fetch_add(1, Ordering::Relaxed);
+
+                // Get file size
+                if let Ok(metadata) = std::fs::metadata(&filename) {
+                    let size = metadata.len();
+                    let dict_filename = format!("{}.dict", lang);
+
+                    let dict_meta = DictionaryMetadata {
+                        size,
+                        filename: dict_filename,
+                        date: now,
+                        dict_type,
+                        word_count,
+                    };
+
+                    let mut map = metadata_ref.lock().unwrap();
+                    map.insert(lang.to_string(), dict_meta);
+                }
             }
             Err(e) => {
                 println!("Skipping {}: {}", lang, e);
@@ -139,6 +180,20 @@ fn main() {
         "Completed: {} dictionaries created, {} languages skipped",
         created, skipped
     );
+
+    // Create index.json
+    let metadata_map = dictionary_metadata.lock().unwrap();
+    if !metadata_map.is_empty() {
+        let index_dir = format!("out/dictionaries/{}", TARKKA_FMT_VERSION);
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let index_path = format!("{}/index.json", index_dir);
+
+        let json = serde_json::to_string_pretty(&*metadata_map).unwrap();
+        std::fs::write(&index_path, json).unwrap();
+
+        println!("Created index file: {}", index_path);
+        println!("Indexed {} dictionaries", metadata_map.len());
+    }
 }
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
@@ -149,7 +204,7 @@ pub fn write_tagged<W: Write>(
     mut w: W,
     sorted_words: Vec<WordWithTaggedEntries>,
     timestamp_s: u64,
-) {
+) -> u32 {
     let s = Instant::now();
     let mut groups: BTreeMap<[u8; 3], Vec<&WordWithTaggedEntries>> = BTreeMap::new();
     for word in &sorted_words {
@@ -185,12 +240,14 @@ pub fn write_tagged<W: Write>(
     let mut under_1b = 0;
     let mut under_2b = 0;
     let mut over_2b = 0;
+    let mut word_count = 0u32;
     for (l1_group, words) in groups {
         let mut l2_raw_size = 0u32;
         let mut prev_word = "";
         let group_binary_start = global_binary_offset;
 
         for word in words {
+            word_count += 1;
             let current_word = &word.word;
             let shared_len = common_prefix_len(prev_word, current_word);
             let suffix = &current_word.as_bytes()[shared_len..];
@@ -260,7 +317,7 @@ pub fn write_tagged<W: Write>(
     w.write_all(&(level1_data.len() as u32).to_le_bytes())
         .unwrap();
     w.write_all(&(level2_size as u32).to_le_bytes()).unwrap();
-    w.write_all(&total_ser_size.to_le_bytes()).unwrap();
+    w.write_all(&word_count.to_le_bytes()).unwrap();
     // ^16
     w.write_all(&timestamp_s.to_le_bytes()).unwrap();
     // ^24
@@ -293,6 +350,7 @@ pub fn write_tagged<W: Write>(
         "data size: raw {} compressed {}",
         total_ser_size, compressed_ser_sz
     );
+    word_count
 }
 
 fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<KaikkiWordEntry> {
@@ -458,7 +516,6 @@ pub fn build_tagged_index(
 
     for word in words {
         let (mono_entries, eng_entries) = word_groups.remove(&word).unwrap();
-
         let tag = match (mono_entries.is_empty(), eng_entries.is_empty()) {
             (false, true) => WordTag::Monolingual,
             (true, false) => WordTag::English,
