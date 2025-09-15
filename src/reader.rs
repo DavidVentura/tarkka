@@ -3,6 +3,11 @@ use std::io::Seek;
 use std::io::{Read, SeekFrom};
 use std::time::{Duration, SystemTime};
 
+struct Level2GroupInfo {
+    group_offset: u32,
+    group_size: u32,
+    binary_base_offset: u32,
+}
 struct OffsetFile<R: Read + Seek> {
     reader: R,
     base_offset: u64,
@@ -125,13 +130,12 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             _ => [word_bytes[0], word_bytes[1], word_bytes[2]],
         };
 
-        let (group_offset, group_size, binary_base_offset) =
-            match self.find_level2_group_info(&l1_group)? {
-                Some((offset, size, binary_offset)) => (offset, size, binary_offset),
-                None => return Ok(None),
-            };
+        let l2info = match self.find_level2_group_info(&l1_group)? {
+            Some(l) => l,
+            None => return Ok(None),
+        };
 
-        let result = self.find_in_level2_group(group_offset, group_size, word)?;
+        let result = self.find_in_level2_group(l2info.group_offset, l2info.group_size, word)?;
 
         let (relative_binary_offset, binary_size) = match result {
             None => return Ok(None),
@@ -139,7 +143,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
         };
 
         let absolute_binary_offset =
-            binary_base_offset + relative_binary_offset + self.binary_data_off;
+            l2info.binary_base_offset + relative_binary_offset + self.binary_data_off;
         match self.get_word_from_binary_data(absolute_binary_offset, binary_size, word) {
             Ok(w) => Ok(Some(w)),
             Err(e) => Err(e),
@@ -149,7 +153,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
     fn find_level2_group_info(
         &self,
         l1_group: &[u8; 3],
-    ) -> Result<Option<(u32, u32, u32)>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Level2GroupInfo>, Box<dyn std::error::Error>> {
         let mut pos = 0;
         let mut group_offset = 0u32;
 
@@ -172,7 +176,11 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
                     binary_offset_bytes[2],
                     binary_offset_bytes[3],
                 ]);
-                return Ok(Some((group_offset, size, binary_offset)));
+                return Ok(Some(Level2GroupInfo {
+                    group_offset,
+                    group_size: size,
+                    binary_base_offset: binary_offset,
+                }));
             }
 
             group_offset += size;
@@ -228,7 +236,7 @@ impl<'a, R: Read + Seek> DictionaryReader<'a, R> {
             pos += suffix_len;
 
             if shared_len > 0 {
-                assert!(current_word.len() > 0);
+                assert!(!current_word.is_empty());
                 current_word.truncate(shared_len);
             }
             current_word.extend_from_slice(suffix_b);

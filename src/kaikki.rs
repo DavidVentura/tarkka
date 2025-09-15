@@ -49,7 +49,7 @@ impl KaikkiWordEntry {
             .into_iter()
             .map(|kaikki_sense| Sense {
                 pos: pos.clone(),
-                glosses: vec![Gloss {
+                glosses: [Gloss {
                     gloss_lines: kaikki_sense
                         .glosses
                         .iter()
@@ -69,7 +69,7 @@ impl KaikkiWordEntry {
             .hyphenations
             .iter()
             .filter_map(|h| {
-                if h.parts.len() > 0 {
+                if !h.parts.is_empty() {
                     Some(h.parts.clone())
                 } else {
                     None

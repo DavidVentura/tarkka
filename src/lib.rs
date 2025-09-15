@@ -65,6 +65,6 @@ impl WordWithTaggedEntries {
     ) -> Result<Self, DeserializeError> {
         let mut w = Self::deserialize(data).expect("failed to deserialze");
         w.word = word;
-        return Ok(w);
+        Ok(w)
     }
 }

@@ -107,7 +107,7 @@ impl VarUint {
         if self.0 <= 127 {
             return 1;
         }
-        return 2;
+        2
     }
 }
 impl From<usize> for VarUint {
