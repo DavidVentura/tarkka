@@ -57,7 +57,13 @@ impl KaikkiWordEntry {
                         .glosses
                         .iter()
                         .filter(|s| !(s.starts_with("More information") && s.len() > 512))
-                        .map(|s| s.as_str().trim().trim_end_matches(".").to_string())
+                        .map(|s| {
+                            s.as_str()
+                                .trim()
+                                .trim_end_matches(".")
+                                .trim_end_matches("。")
+                                .to_string()
+                        })
                         .unique()
                         .collect(),
                 }]

@@ -3,10 +3,6 @@ pub mod de;
 pub mod kaikki;
 pub mod reader;
 pub mod ser;
-pub mod test_skip;
-pub mod test_varuint;
-//pub mod test_enum;
-//pub mod test_ser;
 use de::CompactDeserialize;
 use ser::CompactSerialize;
 

@@ -135,12 +135,13 @@ fn main() {
     println!("read {:?} - w={}", s.elapsed(), d.word_count());
     let s = Instant::now();
     //let lookup = "perro";
-    let lookup = "嬢";
     let lookup = "こんにちは";
+    let lookup = "会";
     println!("looking up");
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());
     if let Some(w) = r {
+        println!("{w:#?}");
         pretty_print(lookup, w);
     } else {
         println!("not found: '{lookup}'")

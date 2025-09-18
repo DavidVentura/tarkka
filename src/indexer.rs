@@ -491,7 +491,11 @@ fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
     }
 
     // Convert back to Vec and sort by POS for consistent ordering
-    let mut merged_senses: Vec<tarkka::Sense> = pos_to_sense.into_values().collect();
+    let mut merged_senses: Vec<tarkka::Sense> = pos_to_sense
+        .into_values()
+        .filter(|e| !e.glosses.is_empty())
+        .filter(|e| !(e.glosses.iter().all(|g| g.gloss_lines.is_empty())))
+        .collect();
     merged_senses.sort_by(|a, b| a.pos.to_string().cmp(&b.pos.to_string()));
     *senses = merged_senses;
 }
