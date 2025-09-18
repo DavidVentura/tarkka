@@ -1,4 +1,4 @@
-use crate::{Gloss, Sense, WordEntryComplete, WordTag, WordWithTaggedEntries};
+use crate::{Gloss, PartOfSpeech, Sense, WordEntryComplete, WordTag, WordWithTaggedEntries};
 use itertools::Itertools;
 
 #[cfg(feature = "indexer")]
@@ -32,6 +32,8 @@ pub struct KaikkiWordEntry {
     pub hyphenations: Vec<Hyphenation>,
     #[cfg_attr(feature = "indexer", serde(default))]
     pub sounds: Vec<Sound>,
+    #[cfg_attr(feature = "indexer", serde(default))]
+    pub redirects: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -43,12 +45,13 @@ pub struct KaikkiSense {
 
 impl KaikkiWordEntry {
     pub fn to_word_entry_complete(self, tag: WordTag) -> WordWithTaggedEntries {
-        let pos = self.pos.unwrap_or_else(|| "unknown".to_string());
+        let pos_str = self.pos.expect("pos is required");
+        let pos = PartOfSpeech::try_from(pos_str.as_str()).expect("invalid part of speech");
         let senses = self
             .senses
             .into_iter()
             .map(|kaikki_sense| Sense {
-                pos: pos.clone(),
+                pos,
                 glosses: [Gloss {
                     gloss_lines: kaikki_sense
                         .glosses
@@ -86,6 +89,7 @@ impl KaikkiWordEntry {
                 .find(|e| e.ipa.is_some())
                 .and_then(|e| e.ipa.clone()),
             hyphenations: hyp.first().cloned().unwrap_or(vec![]),
+            redirects: self.redirects.iter().cloned().unique().collect(),
         }
     }
 }

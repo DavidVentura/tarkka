@@ -4,17 +4,20 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use threadpool::ThreadPool;
 use tarkka::kaikki::WordEntry;
+use threadpool::ThreadPool;
 
 // Supported languages from Language.kt
 const SUPPORTED_LANGUAGES: &[&str] = &[
     "sq", "ar", "az", "bn", "bg", "ca", "zh", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
     "el", "gu", "he", "hi", "hu", "id", "it", "ja", "kn", "ko", "lv", "lt", "ms", "ml", "fa", "pl",
-    "pt", "ro", "ru", "sk", "sl", "es", "sv", "ta", "te", "tr", "uk",
+    "pt", "ro", "ru", "sk", "sl", "es", "sv", "ta", "te", "tr", "uk", "is",
 ];
 
-fn download_file(url: &str, output_path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn download_file(
+    url: &str,
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if Path::new(output_path).exists() {
         println!("File already exists: {}", output_path);
         return Ok(());
@@ -125,7 +128,6 @@ fn split_file(
 
         // Update stats
         *stats.entry(lang_code).or_insert(0) += 1;
-
     }
 
     // Flush all writers
@@ -203,7 +205,7 @@ fn main() {
             lang, lang
         );
         let path = format!("{}/{}-extract.jsonl.gz", downloads_dir, lang);
-        
+
         download_tasks.push((lang.to_string(), url, path));
     }
 
@@ -212,27 +214,28 @@ fn main() {
         let downloaded_files = Arc::clone(&downloaded_files);
         let failed_downloads = Arc::clone(&failed_downloads);
 
-        pool.execute(move || {
-            match download_file(&url, &path) {
-                Ok(()) => {
-                    downloaded_files.lock().unwrap().push((lang.clone(), path));
-                }
-                Err(e) => {
-                    if e.to_string().contains("404") {
-                        if lang == "en" {
-                            println!("English file not available (404), skipping...");
-                        } else {
-                            println!("Language file not available for '{}' (404), skipping...", lang);
-                        }
+        pool.execute(move || match download_file(&url, &path) {
+            Ok(()) => {
+                downloaded_files.lock().unwrap().push((lang.clone(), path));
+            }
+            Err(e) => {
+                if e.to_string().contains("404") {
+                    if lang == "en" {
+                        println!("English file not available (404), skipping...");
                     } else {
-                        if lang == "en" {
-                            eprintln!("Error downloading English file: {}", e);
-                        } else {
-                            eprintln!("Error downloading file for '{}': {}", lang, e);
-                        }
+                        println!(
+                            "Language file not available for '{}' (404), skipping...",
+                            lang
+                        );
                     }
-                    failed_downloads.lock().unwrap().push(lang);
+                } else {
+                    if lang == "en" {
+                        eprintln!("Error downloading English file: {}", e);
+                    } else {
+                        eprintln!("Error downloading file for '{}': {}", lang, e);
+                    }
                 }
+                failed_downloads.lock().unwrap().push(lang);
             }
         });
     }
@@ -240,8 +243,14 @@ fn main() {
     // Wait for all downloads to complete
     pool.join();
 
-    let downloaded_files = Arc::try_unwrap(downloaded_files).unwrap().into_inner().unwrap();
-    let failed_downloads = Arc::try_unwrap(failed_downloads).unwrap().into_inner().unwrap();
+    let downloaded_files = Arc::try_unwrap(downloaded_files)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    let failed_downloads = Arc::try_unwrap(failed_downloads)
+        .unwrap()
+        .into_inner()
+        .unwrap();
 
     println!("\nDownloads completed!");
     println!("Successfully downloaded: {} files", downloaded_files.len());
@@ -292,12 +301,17 @@ fn main() {
     // Wait for all processing to complete
     processing_pool.join();
 
-    let processing_results = Arc::try_unwrap(processing_results).unwrap().into_inner().unwrap();
-    let successful_processing = processing_results.iter().filter(|(_, result)| result.is_ok()).count();
+    let processing_results = Arc::try_unwrap(processing_results)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    let successful_processing = processing_results
+        .iter()
+        .filter(|(_, result)| result.is_ok())
+        .count();
     let failed_processing = processing_results.len() - successful_processing;
 
     println!("\nAll processing completed!");
     println!("Successfully processed: {} files", successful_processing);
     println!("Failed processing: {} files", failed_processing);
 }
-

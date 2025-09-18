@@ -169,6 +169,22 @@ fn create_word_with_tagged_entries_jobject(
         );
     }
 
+    // Create redirects list
+    let redirects_list = match env.new_object("java/util/ArrayList", "()V", &[]) {
+        Ok(list) => list,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    for redirect in &word.redirects {
+        let redirect_string = env.new_string(redirect).unwrap();
+        let _ = env.call_method(
+            &redirects_list,
+            "add",
+            "(Ljava/lang/Object;)Z",
+            &[(&redirect_string).into()],
+        );
+    }
+
     let null_obj = JObject::null();
     let sounds_jvalue = if let Some(ref jstring) = sounds_param {
         jstring.into()
@@ -178,13 +194,14 @@ fn create_word_with_tagged_entries_jobject(
 
     match env.new_object(
         "dev/davidv/translator/WordWithTaggedEntries",
-        "(Ljava/lang/String;ILjava/util/List;Ljava/lang/String;Ljava/util/List;)V",
+        "(Ljava/lang/String;ILjava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/util/List;)V",
         &[
             (&word_string).into(),
             tag_value.into(),
             (&entries_list).into(),
             sounds_jvalue,
             (&hyphenations_list).into(),
+            (&redirects_list).into(),
         ],
     ) {
         Ok(obj) => obj.into_raw(),
@@ -227,7 +244,7 @@ fn create_word_entry_complete_jobject(
 }
 
 fn create_sense_jobject(env: &mut JNIEnv, sense: &crate::Sense) -> jobject {
-    let pos_string = env.new_string(&sense.pos).unwrap();
+    let pos_string = env.new_string(&sense.pos.to_string()).unwrap();
 
     let list = match env.new_object("java/util/ArrayList", "()V", &[]) {
         Ok(list) => list,

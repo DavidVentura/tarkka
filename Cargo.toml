@@ -13,10 +13,6 @@ name = "lookup"
 path = "src/lookup.rs"
 
 [[bin]]
-name = "split_by_lang"
-path = "src/split_by_lang.rs"
-
-[[bin]]
 name = "download_and_split"
 path = "src/download_and_split.rs"
 required-features = ["indexer"]
@@ -35,6 +31,8 @@ serde = { version = "1.0.219", features = ["derive"], optional = true }
 
 itertools = { version = "0.14.0" }
 zeekstd = "0.6.0"
+#zstd-sys = { version = "2", features = ["fat-lto"]}
+zstd-sys = { version = "2"}
 tarkka_derive = { path = "tarkka_derive" }
 
 [target.'cfg(target_os="android")'.dependencies]
@@ -44,8 +42,8 @@ jni = { version = "0.21.1", default-features = false }
 indexer = ["ureq", "threadpool", "serde", "serde_json", "flate2"]
 
 [profile.release]
-debug = true
-lto = true
-panic = "abort"
-codegen-units = 1
+debug = false
+#lto = "fat"
+#panic = "abort"
+#codegen-units = 1
 strip = true

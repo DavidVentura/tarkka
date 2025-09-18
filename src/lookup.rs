@@ -1,12 +1,20 @@
 use std::{fs::File, io::BufReader, time::Instant};
 
-use tarkka::{WordTag, WordWithTaggedEntries, reader::DictionaryReader};
+use tarkka::{PartOfSpeech, WordTag, WordWithTaggedEntries, reader::DictionaryReader};
 
-fn display_glosses_with_categories(glosses: &[tarkka::Gloss], pos: &str, tag_prefix: &str) {
+fn display_glosses_with_categories(
+    glosses: &[tarkka::Gloss],
+    pos: &PartOfSpeech,
+    tag_prefix: &str,
+    redirects: &[String],
+) {
     let mut last_category_path: Vec<String> = Vec::new();
 
     println!("{}{}: ", tag_prefix, pos);
 
+    if *pos == PartOfSpeech::SoftRedirect {
+        println!("{:?}", redirects);
+    }
     for gloss in glosses {
         // Reconstruct full category path from compressed format
         let current_category_path = Vec::new();
@@ -73,7 +81,12 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
             // All entries are monolingual
             for entry in &w.entries {
                 for sense in &entry.senses {
-                    display_glosses_with_categories(&sense.glosses, &sense.pos, "[MONO] ");
+                    display_glosses_with_categories(
+                        &sense.glosses,
+                        &sense.pos,
+                        "[MONO] ",
+                        &w.redirects,
+                    );
                 }
             }
         }
@@ -81,7 +94,12 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
             // All entries are English
             for entry in &w.entries {
                 for sense in &entry.senses {
-                    display_glosses_with_categories(&sense.glosses, &sense.pos, "[ENG] ");
+                    display_glosses_with_categories(
+                        &sense.glosses,
+                        &sense.pos,
+                        "[ENG] ",
+                        &w.redirects,
+                    );
                 }
             }
         }
@@ -91,12 +109,17 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
 
             // First entry is monolingual
             for sense in &w.entries[0].senses {
-                display_glosses_with_categories(&sense.glosses, &sense.pos, "[MONO] ");
+                display_glosses_with_categories(
+                    &sense.glosses,
+                    &sense.pos,
+                    "[MONO] ",
+                    &w.redirects,
+                );
             }
 
             // Second entry is English
             for sense in &w.entries[1].senses {
-                display_glosses_with_categories(&sense.glosses, &sense.pos, "[ENG] ");
+                display_glosses_with_categories(&sense.glosses, &sense.pos, "[ENG] ", &w.redirects);
             }
         }
     }
@@ -105,14 +128,15 @@ fn pretty_print(wn: &str, w: WordWithTaggedEntries) {
 fn main() {
     let s = Instant::now();
     //let f = File::open("en-multi-dictionary.dict").unwrap();
-    let f = File::open("out/dictionaries/1/pl.dict").unwrap();
+    let f = File::open("out/dictionaries/1/ja.dict").unwrap();
     let bf = BufReader::new(f);
     println!("open, words");
     let mut d = DictionaryReader::open(bf).unwrap();
     println!("read {:?} - w={}", s.elapsed(), d.word_count());
     let s = Instant::now();
     //let lookup = "perro";
-    let lookup = "pies";
+    let lookup = "嬢";
+    let lookup = "こんにちは";
     println!("looking up");
     let r = d.lookup(lookup).unwrap();
     println!("looked 1st up {:?}", s.elapsed());

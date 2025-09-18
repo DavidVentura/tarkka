@@ -11,7 +11,10 @@ use std::sync::{
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
 use tarkka::reader::DictionaryReader;
-use tarkka::{HEADER_SIZE, TARKKA_FMT_VERSION, WordEntryComplete, WordTag, WordWithTaggedEntries};
+use tarkka::{
+    HEADER_SIZE, PartOfSpeech, TARKKA_FMT_VERSION, WordEntryComplete, WordTag,
+    WordWithTaggedEntries,
+};
 use threadpool::ThreadPool;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,7 +31,7 @@ struct DictionaryMetadata {
 const SUPPORTED_LANGUAGES: &[&str] = &[
     "sq", "ar", "az", "bn", "bg", "ca", "zh", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
     "el", "gu", "he", "hi", "hu", "id", "it", "ja", "kn", "ko", "lv", "lt", "ms", "ml", "fa", "pl",
-    "pt", "ro", "ru", "sk", "sl", "es", "sv", "ta", "te", "tr", "uk",
+    "pt", "ro", "ru", "sk", "sl", "es", "sv", "ta", "te", "tr", "uk", "is",
 ];
 
 pub mod reader;
@@ -57,7 +60,7 @@ fn lang_words(word_lang: &str, gloss_lang: &str, fname: &str) -> Vec<WordWithTag
 fn create_dictionary(
     lang: &str,
     timestamp_s: u64,
-) -> Result<(String, String, u32), Box<dyn std::error::Error>> {
+) -> Result<(String, String, u32, u64), Box<dyn std::error::Error>> {
     println!("Processing: {}", lang);
 
     let monolingual_path = format!("out/monolingual/{}.jsonl", lang);
@@ -86,7 +89,12 @@ fn create_dictionary(
     if Path::new(&output_filename).exists() {
         let r = DictionaryReader::open(std::fs::File::open(&output_filename).unwrap()).unwrap();
         println!("Dictionary already exists, skipping: {}", output_filename);
-        return Ok((output_filename, dict_type.to_string(), r.word_count()));
+        return Ok((
+            output_filename,
+            dict_type.to_string(),
+            r.word_count(),
+            r.created_at().duration_since(UNIX_EPOCH)?.as_secs(),
+        ));
     }
 
     // Load available data
@@ -125,7 +133,12 @@ fn create_dictionary(
     println!("Writing took {:?}", s.elapsed());
     println!("Created: {}\n", output_filename);
 
-    Ok((output_filename, dict_type.to_string(), word_count))
+    Ok((
+        output_filename,
+        dict_type.to_string(),
+        word_count,
+        timestamp_s,
+    ))
 }
 
 fn main() {
@@ -144,10 +157,9 @@ fn main() {
         let metadata_ref = Arc::clone(&dictionary_metadata);
 
         pool.execute(move || match create_dictionary(lang, now) {
-            Ok((filename, dict_type, word_count)) => {
+            Ok((filename, dict_type, word_count, timestamp)) => {
                 created_ref.fetch_add(1, Ordering::Relaxed);
 
-                // Get file size
                 if let Ok(metadata) = std::fs::metadata(&filename) {
                     let size = metadata.len();
                     let dict_filename = format!("{}.dict", lang);
@@ -155,7 +167,7 @@ fn main() {
                     let dict_meta = DictionaryMetadata {
                         size,
                         filename: dict_filename,
-                        date: now,
+                        date: timestamp,
                         dict_type,
                         word_count,
                     };
@@ -183,12 +195,21 @@ fn main() {
 
     // Create index.json
     let metadata_map = dictionary_metadata.lock().unwrap();
+
     if !metadata_map.is_empty() {
         let index_dir = format!("out/dictionaries/{}", TARKKA_FMT_VERSION);
         std::fs::create_dir_all(&index_dir).unwrap();
         let index_path = format!("{}/index.json", index_dir);
+        let max_ts = metadata_map.values().map(|v| v.date).max().unwrap();
 
-        let json = serde_json::to_string_pretty(&*metadata_map).unwrap();
+        let mut index_map = serde_json::Map::new();
+        index_map.insert("version".into(), TARKKA_FMT_VERSION.into());
+        index_map.insert("updated_at".into(), max_ts.into());
+        index_map.insert(
+            "dictionaries".into(),
+            serde_json::to_value(&*metadata_map).unwrap(),
+        );
+        let json = serde_json::to_string_pretty(&index_map).unwrap();
         std::fs::write(&index_path, json).unwrap();
 
         println!("Created index file: {}", index_path);
@@ -261,6 +282,7 @@ pub fn write_tagged<W: Write>(
                 word.word
             );
 
+            // {"word": "こんにちは", "lang": "Japanese", "lang_code": "ja", "redirects": ["今日は"], "pos": "soft-redirect", "senses": [{"tags": ["no-gloss"]}]}
             let ser_size = word.serialize(&mut all_serialized).unwrap();
             assert!(
                 ser_size <= (u16::MAX / 2u16) as usize,
@@ -356,7 +378,7 @@ pub fn write_tagged<W: Write>(
 fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<KaikkiWordEntry> {
     let reader = BufReader::new(raw_data);
     let lines = reader.lines();
-    let unwanted_pos = vec!["proverb"];
+    let unwanted_pos = vec!["proverb", "phrase", "prep_phrase", "symbol"];
     let mut words: Vec<KaikkiWordEntry> = Vec::with_capacity(1_000_000);
 
     for line in lines {
@@ -402,7 +424,7 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<KaikkiWordEntry
         }
 
         // no definitions, not the most useful dictionary
-        if kaikki_word.senses.is_empty() {
+        if kaikki_word.senses.is_empty() && kaikki_word.redirects.is_empty() {
             continue;
         }
 
@@ -413,6 +435,7 @@ fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<KaikkiWordEntry
     words
 }
 
+// multiple entries with a single sense into 1 entry with multiple senses
 fn aggregate_entries(entries: Vec<WordWithTaggedEntries>) -> WordEntryComplete {
     if entries.is_empty() {
         panic!("Cannot aggregate empty entries");
@@ -448,9 +471,13 @@ fn aggregate_entries(entries: Vec<WordWithTaggedEntries>) -> WordEntryComplete {
 fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
     use std::collections::HashMap;
 
-    let mut pos_to_sense: HashMap<String, tarkka::Sense> = HashMap::new();
+    let mut pos_to_sense: HashMap<PartOfSpeech, tarkka::Sense> = HashMap::new();
 
     for sense in senses.drain(..) {
+        // remove SoftRedirects here, they are already part of redirects
+        if sense.pos == PartOfSpeech::SoftRedirect {
+            continue;
+        }
         match pos_to_sense.get_mut(&sense.pos) {
             Some(existing_sense) => {
                 // Merge glosses
@@ -458,14 +485,14 @@ fn merge_same_pos_senses(senses: &mut Vec<tarkka::Sense>) {
                 existing_sense.glosses = existing_sense.glosses.iter().cloned().unique().collect();
             }
             None => {
-                pos_to_sense.insert(sense.pos.clone(), sense);
+                pos_to_sense.insert(sense.pos, sense);
             }
         }
     }
 
     // Convert back to Vec and sort by POS for consistent ordering
     let mut merged_senses: Vec<tarkka::Sense> = pos_to_sense.into_values().collect();
-    merged_senses.sort_by(|a, b| a.pos.cmp(&b.pos));
+    merged_senses.sort_by(|a, b| a.pos.to_string().cmp(&b.pos.to_string()));
     *senses = merged_senses;
 }
 
@@ -523,24 +550,48 @@ pub fn build_tagged_index(
             (true, true) => unreachable!("Empty word group"),
         };
 
-        let (entries, selected_sound, selected_hyphenation) = match tag {
+        let (entries, selected_sound, selected_hyphenation, redirects) = match tag {
             WordTag::Monolingual => {
                 let (sound, hyph) = extract_sound_and_hyph(&mono_entries);
+                let redirects: Vec<String> = mono_entries
+                    .iter()
+                    .map(|e| e.redirects.clone())
+                    .flatten()
+                    .collect();
                 let entry = aggregate_entries(mono_entries);
-                (vec![entry], sound, hyph)
+
+                (vec![entry], sound, hyph, redirects)
             }
             WordTag::English => {
+                let redirects: Vec<String> = eng_entries
+                    .iter()
+                    .map(|e| e.redirects.clone())
+                    .flatten()
+                    .collect();
                 let (sound, hyph) = extract_sound_and_hyph(&eng_entries);
                 let entry = aggregate_entries(eng_entries);
-                (vec![entry], sound, hyph)
+                (vec![entry], sound, hyph, redirects)
             }
             WordTag::Both => {
+                let mut eng_redirects: Vec<_> = eng_entries
+                    .iter()
+                    .map(|e| e.redirects.clone())
+                    .flatten()
+                    .collect();
+                let mut redirects: Vec<String> = mono_entries
+                    .iter()
+                    .map(|e| e.redirects.clone())
+                    .flatten()
+                    .collect();
+
                 // Prefer monolingual sound/hyphenation, fallback to English
                 let (mono_sound, mono_hyph) = extract_sound_and_hyph(&mono_entries);
                 let (eng_sound, eng_hyph) = extract_sound_and_hyph(&eng_entries);
 
                 let eng_entry = aggregate_entries(eng_entries);
                 let mono_entry = aggregate_entries(mono_entries);
+
+                redirects.append(&mut eng_redirects);
 
                 let selected_sound = mono_sound.or(eng_sound);
                 let selected_hyphenation = if !mono_hyph.is_empty() {
@@ -553,6 +604,7 @@ pub fn build_tagged_index(
                     vec![mono_entry, eng_entry],
                     selected_sound,
                     selected_hyphenation,
+                    redirects,
                 )
             }
         };
@@ -563,6 +615,7 @@ pub fn build_tagged_index(
             entries,
             sounds: selected_sound,
             hyphenations: selected_hyphenation,
+            redirects: redirects.iter().cloned().unique().collect(),
         });
     }
     result
@@ -590,7 +643,7 @@ mod tests {
         (
             WordEntryComplete {
                 senses: vec![tarkka::Sense {
-                    pos: pos.to_string(),
+                    pos: PartOfSpeech::try_from(pos).expect("invalid pos in test"),
                     glosses: vec![tarkka::Gloss {
                         gloss_lines: vec![gloss.to_string()],
                     }],
@@ -732,12 +785,12 @@ mod tests {
         assert_eq!(word.word, "dictionary");
         assert!(matches!(word.tag, WordTag::Both));
         assert_eq!(word.entries.len(), 2); // Exactly 2 entries for Both tag
-        assert_eq!(word.entries[0].senses[0].pos, "noun"); // First entry is monolingual
+        assert_eq!(word.entries[0].senses[0].pos, PartOfSpeech::Noun); // First entry is monolingual
         assert_eq!(
             word.entries[0].senses[0].glosses[0].gloss_lines[0],
             "a book of word definitions"
         );
-        assert_eq!(word.entries[1].senses[0].pos, "noun"); // Second entry is English
+        assert_eq!(word.entries[1].senses[0].pos, PartOfSpeech::Noun); // Second entry is English
         assert_eq!(
             word.entries[1].senses[0].glosses[0].gloss_lines[0],
             "reference book"
@@ -749,7 +802,7 @@ mod tests {
         assert_eq!(word.word, "papa");
         assert!(matches!(word.tag, WordTag::Monolingual));
         assert_eq!(word.entries.len(), 1);
-        assert_eq!(word.entries[0].senses[0].pos, "noun");
+        assert_eq!(word.entries[0].senses[0].pos, PartOfSpeech::Noun);
 
         let result = dict_reader.lookup("nonexistent").unwrap();
         assert!(result.is_none());
@@ -760,19 +813,19 @@ mod tests {
         let mut entry = WordEntryComplete {
             senses: vec![
                 tarkka::Sense {
-                    pos: "noun".to_string(),
+                    pos: PartOfSpeech::Noun,
                     glosses: vec![tarkka::Gloss {
                         gloss_lines: vec!["first noun definition".to_string()],
                     }],
                 },
                 tarkka::Sense {
-                    pos: "adj".to_string(),
+                    pos: PartOfSpeech::Adj,
                     glosses: vec![tarkka::Gloss {
                         gloss_lines: vec!["adjective definition".to_string()],
                     }],
                 },
                 tarkka::Sense {
-                    pos: "noun".to_string(),
+                    pos: PartOfSpeech::Noun,
                     glosses: vec![tarkka::Gloss {
                         gloss_lines: vec!["second noun definition".to_string()],
                     }],
@@ -786,10 +839,18 @@ mod tests {
         assert_eq!(entry.senses.len(), 2);
 
         // Find the noun sense (should be first due to sorting)
-        let noun_sense = entry.senses.iter().find(|s| s.pos == "noun").unwrap();
+        let noun_sense = entry
+            .senses
+            .iter()
+            .find(|s| s.pos == PartOfSpeech::Noun)
+            .unwrap();
         assert_eq!(noun_sense.glosses.len(), 2);
 
-        let adj_sense = entry.senses.iter().find(|s| s.pos == "adj").unwrap();
+        let adj_sense = entry
+            .senses
+            .iter()
+            .find(|s| s.pos == PartOfSpeech::Adj)
+            .unwrap();
         assert_eq!(adj_sense.glosses.len(), 1);
     }
 }
