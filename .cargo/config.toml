@@ -1,0 +1,5 @@
+[build]
+rustflags = ['--remap-path-prefix', '/usr/local/cargo/registry/src/=/',
+             '--remap-path-prefix', '/home/vagrant/.cargo/registry/src/=/',
+             '--remap-path-prefix', '/home/david/.cargo/registry/src/=/',
+            ]
