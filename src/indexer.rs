@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
+use tarkka::kaikki::KaikkiWordEntry;
 use tarkka::reader::DictionaryReader;
 use tarkka::{
     HEADER_SIZE, PartOfSpeech, TARKKA_FMT_VERSION, WordEntryComplete, WordTag,
@@ -42,7 +42,7 @@ use zeekstd::{EncodeOptions, FrameSizePolicy};
 fn lang_words(word_lang: &str, gloss_lang: &str, fname: &str) -> Vec<WordWithTaggedEntries> {
     let f = File::open(fname).unwrap();
     let s = Instant::now();
-    let good_words = filter(word_lang, f);
+    let good_words = filter(f);
     println!("Filter took {:?}", s.elapsed());
     let tag = match (word_lang, gloss_lang) {
         (_, "en") => WordTag::English,
@@ -375,61 +375,15 @@ pub fn write_tagged<W: Write>(
     word_count
 }
 
-fn filter<R: Read + Seek>(wanted_lang: &str, raw_data: R) -> Vec<KaikkiWordEntry> {
+// TODO: a bit garbo to do this
+fn filter<R: Read + Seek>(raw_data: R) -> Vec<KaikkiWordEntry> {
     let reader = BufReader::new(raw_data);
     let lines = reader.lines();
-    let unwanted_pos = vec!["proverb", "phrase", "prep_phrase", "symbol"];
     let mut words: Vec<KaikkiWordEntry> = Vec::with_capacity(1_000_000);
 
     for line in lines {
-        let line = line.unwrap();
-        if line.len() == 0 {
-            continue;
-        }
-
-        // First parse as basic WordEntry to check lang and word validity
-        let word_entry: WordEntry = serde_json::from_str(&line).unwrap();
-        match word_entry.lang_code {
-            None => continue,
-            Some(lang_code) => {
-                if lang_code != wanted_lang {
-                    continue;
-                }
-            }
-        }
-        match word_entry.word {
-            Some(w) => {
-                // special chinese comma
-                if w.contains(" ") || w.contains("，") {
-                    // phrases, like 'animal doméstico' don't make sense
-                    // in a WORD dictionary
-                    continue;
-                }
-            }
-            None => {
-                // a non-word word?
-                continue;
-            }
-        }
-
-        // ^^ parseable
-        // vv parse as complete entry
-        let mut kaikki_word: KaikkiWordEntry = serde_json::from_str(&line).unwrap();
-
-        // Check POS at the sense level
-        if let Some(ref pos) = kaikki_word.pos {
-            if unwanted_pos.contains(&pos.as_str()) {
-                continue;
-            }
-        }
-
-        // no definitions, not the most useful dictionary
-        if kaikki_word.senses.is_empty() && kaikki_word.redirects.is_empty() {
-            continue;
-        }
-
+        let mut kaikki_word: KaikkiWordEntry = serde_json::from_str(&line.unwrap()).unwrap();
         kaikki_word.sounds.retain_mut(|s| s.ipa.is_some());
-
         words.push(kaikki_word);
     }
     words
