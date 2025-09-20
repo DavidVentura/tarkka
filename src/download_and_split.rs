@@ -1,11 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, create_dir_all};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tarkka::kaikki::WordEntry;
+use tarkka::kaikki::{KaikkiWordEntry, WordEntry};
 use threadpool::ThreadPool;
+
+struct LanguageFilter {
+    lang: String,
+    aliases: Vec<String>,
+}
 
 // Supported languages from Language.kt
 const SUPPORTED_LANGUAGES: &[&str] = &[
@@ -44,7 +49,7 @@ fn download_file(
 fn split_file(
     input_file: &str,
     output_dir: &str,
-    filter_lang: Option<&str>,
+    filter_lang: Option<LanguageFilter>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let start = Instant::now();
     let mut stats = std::collections::HashMap::new();
@@ -58,10 +63,31 @@ fn split_file(
     // Create supported languages set
     let supported_langs: HashSet<&str> = SUPPORTED_LANGUAGES.iter().cloned().collect();
 
+    // Create aliases hashmap
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    aliases.insert("sh".to_string(), "hr".to_string()); // 'sh' is serbo-croatian, which is
+    // deprecated since 2000s but
+    // Wiktionary still uses it for
+    // 'Croatian Serbo-Croatian'
+
+    // Create filter set from filter_lang and its aliases
+    let filter_langs: Option<HashSet<String>> = filter_lang.map(|filter| {
+        let mut langs = HashSet::new();
+        langs.insert(filter.lang.clone());
+        for alias in &filter.aliases {
+            langs.insert(alias.clone());
+        }
+        if let Some(alias) = aliases.get(&filter.lang) {
+            langs.insert(alias.clone());
+        }
+        langs
+    });
+
     // Open and decompress input file
     let file = File::open(input_file)?;
     let decoder = flate2::read::GzDecoder::new(file);
     let reader = BufReader::new(decoder);
+    let unwanted_pos = vec!["proverb", "phrase", "prep_phrase", "symbol"];
 
     for line in reader.lines() {
         let line = line?;
@@ -81,18 +107,19 @@ fn split_file(
             }
         };
 
-        let lang_code = match word_entry.lang_code {
-            Some(code) => code,
+        let lang_code: String = match word_entry.lang_code {
+            // cast 'sh' to 'hr'
+            Some(code) => aliases.get(&code).cloned().unwrap_or(code.clone()),
             None => {
                 skipped_lines += 1;
                 continue;
             }
         };
 
-        // Skip phrases with spaces
+        // Skip phrases with spaces and chinese comma
         match word_entry.word {
             Some(w) => {
-                if w.contains(" ") {
+                if w.contains(" ") || w.contains("，") {
                     continue;
                 }
             }
@@ -106,15 +133,28 @@ fn split_file(
         }
 
         // If filtering for specific language, skip others
-        if let Some(filter) = filter_lang {
-            if lang_code.as_str() != filter {
+        if let Some(ref filter_set) = filter_langs {
+            if !filter_set.contains(lang_code.as_str()) {
                 skipped_lines += 1;
                 continue;
             }
         }
+        let kaikki_word: KaikkiWordEntry = serde_json::from_str(&line).unwrap();
+
+        // Check POS at the sense level
+        if let Some(ref pos) = kaikki_word.pos {
+            if unwanted_pos.contains(&pos.as_str()) {
+                continue;
+            }
+        }
+
+        // no definitions, not the most useful dictionary
+        if kaikki_word.senses.is_empty() && kaikki_word.redirects.is_empty() {
+            continue;
+        }
 
         // Get or create writer for this language
-        if !writers.contains_key(&lang_code) {
+        if !writers.contains_key(lang_code.as_str()) {
             let output_file = format!("{}/{}.jsonl", output_dir, lang_code);
             let file = File::create(&output_file)?;
             let writer = BufWriter::new(file);
@@ -123,7 +163,7 @@ fn split_file(
         }
 
         // Write line to the appropriate file
-        let writer = writers.get_mut(&lang_code).unwrap();
+        let writer = writers.get_mut(lang_code.as_str()).unwrap();
         writeln!(writer, "{}", line)?;
 
         // Update stats
@@ -282,7 +322,11 @@ fn main() {
                 }
             } else {
                 // Other languages: filter to specific language, output to monolingual directory
-                match split_file(&file_path, &monolingual_dir, Some(&lang)) {
+                let filter = LanguageFilter {
+                    lang: lang.clone(),
+                    aliases: vec![],
+                };
+                match split_file(&file_path, &monolingual_dir, Some(filter)) {
                     Ok(()) => {
                         println!("Successfully processed {} file", lang);
                         Ok(())
