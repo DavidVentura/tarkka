@@ -17,11 +17,6 @@ name = "download_and_split"
 path = "src/download_and_split.rs"
 required-features = ["indexer"]
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-name = "tarkka"
-path = "src/lib.rs"
-
 [dependencies]
 ureq = { version = "2.9", optional = true }
 threadpool = { version = "1.8", optional = true }
@@ -37,10 +32,3 @@ tarkka_derive = { path = "tarkka_derive" }
 
 [features]
 indexer = ["ureq", "threadpool", "serde", "serde_json", "flate2"]
-
-[profile.release]
-debug = false
-#lto = "fat"
-#panic = "abort"
-#codegen-units = 1
-strip = true
